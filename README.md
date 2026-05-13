@@ -158,8 +158,7 @@ kage session clear work      # clear context: kill tmux + new UUID, same name
 - `--model NAME` -- model alias to pass through (e.g. opus, sonnet)
 - `--effort LEVEL` -- effort level to pass through (low/medium/high/xhigh/max)
 - `--bare` -- pass `--bare` to the backend. **Caution:** for Claude Code
-  this forces API-key mode and skips your subscription auth. Only use if
-  you have `ANTHROPIC_API_KEY` set.
+  this forces API-key mode and skips your subscription auth. See Caveats.
 - `--output-format {text,json,stream-json}` -- output format (default text)
 - `--json` -- shorthand for `--output-format=json`
 - `--no-stream` -- never stream text, even to a tty
@@ -235,6 +234,47 @@ with named as s:
    emitted as JSON events for `--output-format stream-json`.
 5. Interactive menus (plan approval, etc.) are returned as a structured
    envelope with exit code 10, so callers can decide how to respond.
+
+## Caveats
+
+Things to know before you wire kage into anything important.
+
+- **`--bare` forces API-key mode for Claude Code.** It skips keychain reads,
+  so your subscription auth is ignored. Without `ANTHROPIC_API_KEY` set,
+  the session will fail; with it set, you'll be charged via the API. Don't
+  pass `--bare` unless you have an API key and want to use it.
+- **Auto-memory persists across `session clear`.** `clear` rotates the
+  conversation UUID, but Claude's auto-memory files (facts saved across
+  sessions) are independent. A "cleared" session will still recall things
+  Claude wrote to memory in a previous turn. For full isolation you need
+  API-key mode (`--bare`) or to manually clear memory.
+- **kage parses the rendered TUI.** If the AI CLI changes its prompt
+  marker, done marker, tool-call format, or spinner style, kage's
+  extraction may break until it's updated. Pin a known-good version of the
+  underlying CLI in production environments.
+- **Don't type into a kage-managed tmux session mid-call.** You can attach
+  with `tmux attach -t kage_<backend>_<slug>` to observe, but if you send
+  keys while kage has a request in flight, the next response extraction
+  will be wrong. Take turns.
+- **Tool-call visibility in `stream-json` is best-effort.** Tool name and
+  input are scraped from the TUI's `⏺ Name(input)` rendering. Long inputs
+  get truncated by the renderer, and unusual characters in the input may
+  not round-trip exactly. The text response and done event are reliable;
+  tool events are convenience signals.
+- **`stream-json` text deltas follow kage's poll cadence (~400ms), not the
+  model's token stream.** You get periodic snapshots of the rendered
+  response, not token-by-token output. Final text is correct; intermediate
+  chunks may be larger than a single token.
+- **`kage session show` needs the tmux pane to be running.** If you have
+  only a state record (e.g. just after a reboot), run a regular
+  `kage claude --session=NAME "..."` first to revive the pane.
+- **tmux session name collisions are not auto-resolved.** kage uses
+  `kage_<backend>_<slug>` as the tmux name. If you have another tmux
+  session at that exact name, kage refuses to start. Pick a different
+  `--session` name or kill the existing tmux session.
+- **First call after `tmux kill-server` is slow.** tmux has to spawn the
+  server and start the CLI from cold. Expect 3 to 5 seconds of warm-up
+  before the first response.
 
 ## What this isn't
 
