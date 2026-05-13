@@ -8,6 +8,8 @@ from .base import Backend, Menu
 PROMPT_RE = re.compile(r"^❯[\xa0 ]")
 DONE_RE = re.compile(r"^✻ [A-Za-z]+ for \d+s")
 MENU_OPTION_RE = re.compile(r"^\s*(?:❯[\xa0 ])?\s*(\d+)\.\s+(.+?)\s*$")
+TOOL_CALL_RE = re.compile(r"^⏺ [A-Z][A-Za-z0-9_]*\(")
+RESPONSE_MARKER = "⏺ "
 MENU_HEADERS = (
     "Ready to code?",
     "Enable auto mode?",
@@ -48,7 +50,6 @@ class ClaudeBackend(Backend):
                 last_done = i
         if last_done < 0:
             return ""
-        # The user's message echo is the last `❯ ...` line BEFORE the done marker.
         last_prompt = -1
         for i in range(last_done - 1, -1, -1):
             if PROMPT_RE.match(lines[i]):
@@ -56,13 +57,22 @@ class ClaudeBackend(Backend):
                 break
         if last_prompt < 0:
             return ""
-        body = lines[last_prompt + 1 : last_done]
+        # The response starts at the first `⏺ ` line AFTER the prompt echo,
+        # skipping over the (possibly multi-line) echoed user message.
+        response_start = -1
+        for i in range(last_prompt + 1, last_done):
+            if lines[i].startswith(RESPONSE_MARKER):
+                response_start = i
+                break
+        if response_start < 0:
+            return ""
+        body = lines[response_start : last_done]
         cleaned = []
         for l in body:
             if _is_tool_chrome(l):
                 continue
-            if l.startswith("⏺ "):
-                l = l[2:]
+            if l.startswith(RESPONSE_MARKER):
+                l = l[len(RESPONSE_MARKER):]
             elif l.startswith("  "):
                 l = l[2:]
             cleaned.append(l)
@@ -100,5 +110,7 @@ def _is_tool_chrome(line: str) -> bool:
     if s.startswith("⎿ "):
         return True
     if s.endswith("(ctrl+o to expand)"):
+        return True
+    if TOOL_CALL_RE.match(line):
         return True
     return False
