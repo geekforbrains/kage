@@ -23,32 +23,44 @@ class Backend:
 
     name: str = ""
 
-    def start_command(self, *, system_prompt: str | None = None) -> list[str]:
+    def start_command(
+        self,
+        *,
+        session_id: str | None = None,
+        display_name: str | None = None,
+        system_prompt: str | None = None,
+        bare: bool = False,
+        model: str | None = None,
+        effort: str | None = None,
+    ) -> list[str]:
         raise NotImplementedError
 
     def ready_marker(self, pane: str) -> bool:
-        """True when the TUI has finished loading and is accepting input."""
         raise NotImplementedError
 
     def is_done(self, pane: str) -> bool:
-        """True when the most recent response has finished rendering."""
         raise NotImplementedError
 
     def done_marker_count(self, pane: str) -> int:
-        """How many completed responses are visible in the pane.
+        raise NotImplementedError
 
-        Used to detect a new completion: the count increases by 1 per response.
-        """
+    def is_busy(self, pane: str) -> bool:
+        """True when the backend is mid-response (more user messages than completions)."""
         raise NotImplementedError
 
     def is_menu(self, pane: str) -> bool:
-        """True when the TUI is waiting on a menu choice."""
         raise NotImplementedError
 
     def extract_response(self, pane: str) -> str:
-        """Pull the text of the most recent response from the pane."""
         raise NotImplementedError
 
     def extract_menu(self, pane: str) -> Menu | None:
-        """Pull the pending menu's question and options."""
         raise NotImplementedError
+
+    def extract_tool_uses(self, pane: str) -> list[dict]:
+        """Return tool-use events visible in the current pane.
+
+        Each dict has at least: {"name": str, "input": str}. Order matches
+        rendering order; callers may need to dedupe.
+        """
+        return []

@@ -63,8 +63,8 @@ waits for the full response and prints it once.
 ## Calling from scripts
 
 `kage` is built to be called from automation. The contract is stable:
-`--json` for structured output, exit codes for status, stdin for piped
-input.
+`--json` or `--output-format` for structured output, exit codes for status,
+stdin for piped input.
 
 ```python
 import subprocess, json
@@ -82,42 +82,89 @@ if result.returncode == 0:
     print(data["response"])
 elif result.returncode == 10:
     print("blocked on a menu, see stderr")
+elif result.returncode == 11:
+    print("session was busy and --no-wait was set")
 elif result.returncode == 124:
     print("timed out")
 else:
     print("error:", result.stderr)
 ```
 
-## Persistent sessions
+For systems that need to see tool calls and partial text as they happen,
+use `--output-format stream-json` and parse one JSON line per event:
 
-Pass `--session NAME` to keep context across calls:
-
-```bash
-kage claude --session=work "read src/cli.py and explain the entry point"
-kage claude --session=work "now refactor the dispatch function"
-kage claude --session=work "run the tests"
+```json
+{"type":"start","backend":"claude","session_id":"..."}
+{"type":"tool_use","name":"Bash","input":"echo hello"}
+{"type":"text","delta":"It printed hello."}
+{"type":"done","duration_ms":4247}
 ```
 
-Manage them:
+## Two ways to identify a session
+
+There are two persistence models. Pick the one that fits your caller.
+
+**Named (kage-managed UUID):** `--session=name`. kage stores the underlying
+conversation UUID in its own state file (`~/.local/state/kage/sessions.json`)
+and reuses it on every call with that name. Survives reboots. Best for
+humans and Enso-style scheduled jobs.
 
 ```bash
-kage session list           # list running sessions
-kage session kill work      # terminate a session
-kage session show work      # raw pane dump (debug)
-kage session menu work      # show pending menu, if any
-kage session choose work 2  # answer a pending menu by option number
+kage claude --session=work "read src/cli.py and explain"
+kage claude --session=work "now refactor it"   # same conversation
 ```
+
+**Caller-managed UUID:** `--session-id=<uuid>`. The caller owns the UUID,
+kage just drives it. No state file involvement. Best for systems that
+already track their own session lifecycles (e.g. Harbour).
+
+```bash
+kage claude --session-id=4c8b...69b6 "..."
+kage claude --session-id=4c8b...69b6 "..."     # same conversation
+```
+
+Both modes survive a reboot because the underlying conversation file is
+saved by the AI CLI itself.
+
+## Session management
+
+```bash
+kage session list            # known and running sessions
+kage session kill work       # stop tmux pane, keep the state record
+kage session rm   work       # stop tmux pane and forget the state record
+kage session show work       # raw pane dump (debug)
+kage session menu work       # show pending menu, if any
+kage session choose work 2   # answer a pending menu by option number
+kage session compact work    # /compact: summarize the conversation
+kage session clear work      # clear context: kill tmux + new UUID, same name
+```
+
+`clear` vs `compact`:
+
+- `compact` keeps the same underlying conversation but summarizes its
+  history. Useful when you're close to the context window limit.
+- `clear` starts a brand new conversation under the same kage name. The
+  old conversation file remains on disk but is no longer referenced.
 
 ## Options
 
 `kage claude` (and other backend subcommands) accepts:
 
-- `--session NAME`, `-s NAME` -- reuse a persistent session across calls
+- `--session NAME`, `-s NAME` -- reuse a kage-managed persistent session
+- `--session-id UUID` -- reuse a specific underlying conversation UUID
 - `--timeout SECONDS`, `-t SECONDS` -- max wait for a response (default 120)
 - `--system-prompt TEXT` -- appended to the backend's system prompt, on
   session start only
-- `--json` -- emit a JSON envelope instead of plain text
-- `--no-stream` -- always print the full response at the end, never stream
+- `--model NAME` -- model alias to pass through (e.g. opus, sonnet)
+- `--effort LEVEL` -- effort level to pass through (low/medium/high/xhigh/max)
+- `--bare` -- pass `--bare` to the backend. **Caution:** for Claude Code
+  this forces API-key mode and skips your subscription auth. Only use if
+  you have `ANTHROPIC_API_KEY` set.
+- `--output-format {text,json,stream-json}` -- output format (default text)
+- `--json` -- shorthand for `--output-format=json`
+- `--no-stream` -- never stream text, even to a tty
+- `--no-wait` -- exit with code 11 instead of waiting if the session is
+  mid-response from a previous call
 
 ## Exit codes
 
@@ -127,19 +174,21 @@ kage session choose work 2  # answer a pending menu by option number
 | 1    | Error (session crashed, backend missing, etc.) |
 | 2    | Usage error |
 | 10   | Menu pending, awaiting input |
+| 11   | Session busy and `--no-wait` was set |
 | 124  | Timeout (no response within `--timeout` seconds) |
 
 ## JSON output
 
 ```bash
 $ kage claude --json "what is 2+2"
-{"status":"done","backend":"claude","session":null,"response":"4"}
+{"status":"done","backend":"claude","session":null,"session_id":"...","response":"4"}
 ```
 
 When the TUI is waiting on a menu (e.g. plan approval), you get:
 
 ```json
 {"status":"menu","backend":"claude","session":"work",
+ "session_id":"...",
  "menu":{"question":"Ready to code?","options":["...","..."]}}
 ```
 
@@ -150,10 +199,19 @@ The exit code is `10`. Respond with `kage session choose <name> <number>`.
 ```python
 from kage import Session, get_backend
 
-with Session("work", get_backend("claude")) as s:
+# Three ways to construct a Session:
+named = Session.named("work", get_backend("claude"))
+by_id = Session.by_id("4c8b...-69b6", get_backend("claude"))
+oneshot = Session.ephemeral(get_backend("claude"))
+
+with named as s:
     print(s.send("hello").text)
+
     for chunk in s.stream("write a haiku"):
         print(chunk, end="", flush=True)
+
+    for event in s.stream_events("count to 3"):
+        print(event)
 ```
 
 ## Backends
@@ -166,13 +224,15 @@ with Session("work", get_backend("claude")) as s:
 
 ## How it works
 
-1. `kage` spawns the target CLI inside a detached tmux session.
+1. `kage` spawns the target CLI inside a detached tmux session, pinned to a
+   specific session UUID via `--session-id` (new) or `--resume` (existing).
 2. Your message is loaded into a tmux paste buffer and pasted into the pane,
    then `Enter` is sent as a separate keystroke (sending them together is
    racy for some TUIs).
 3. `kage` polls the rendered pane and watches for backend-specific markers
    (e.g. Claude's `Worked for Ns`) to know when the response is complete.
-4. The response is parsed out of the rendered TUI and printed to stdout.
+4. The response is parsed out of the rendered TUI and printed to stdout, or
+   emitted as JSON events for `--output-format stream-json`.
 5. Interactive menus (plan approval, etc.) are returned as a structured
    envelope with exit code 10, so callers can decide how to respond.
 
