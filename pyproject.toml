@@ -29,6 +29,9 @@ Homepage = "https://github.com/geekforbrains/kage"
 Repository = "https://github.com/geekforbrains/kage"
 Issues = "https://github.com/geekforbrains/kage/issues"
 
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
 [project.scripts]
 kage = "kage.cli:main"
 
@@ -37,3 +40,6 @@ packages = ["src/kage"]
 
 [tool.hatch.build.targets.sdist]
 include = ["src/kage", "README.md", "LICENSE", "pyproject.toml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

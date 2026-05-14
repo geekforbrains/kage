@@ -7,17 +7,29 @@ from pathlib import Path
 
 from .base import Backend, Menu
 
-PROMPT_RE = re.compile(r"^❯[\xa0 ]")
-DONE_RE = re.compile(r"^✻ [A-Za-z]+ for \d+s")
+PROMPT_RE = re.compile(r"^❯(?:[\xa0 ]|$)")
+DONE_RE = re.compile(r"^✻ \S+ for \d+s")
 MENU_OPTION_RE = re.compile(r"^\s*(?:❯[\xa0 ])?\s*(\d+)\.\s+(.+?)\s*$")
-TOOL_CALL_RE = re.compile(r"^⏺ ([A-Z][A-Za-z0-9_]*)\((.*?)\)\s*$")
+MENU_SELECTOR_RE = re.compile(r"^\s*❯[\xa0 ]\s*\d+\.\s+")
+TOOL_CALL_RE = re.compile(
+    r"^⏺ ([A-Z][A-Za-z0-9_]*(?:\s[A-Z][A-Za-z0-9_]*)*)\((.*?)\)\s*$"
+)
+# Active-work spinner: line starts with one of Claude's animated bullets, a
+# verb ending in `…`. Seen variants: `· Percolating…`, `✻ Puttering…`,
+# `✢ Percolating…`. Update if Claude adds new bullet glyphs.
+SPINNER_RE = re.compile(r"^\s*[·✴✦✶✻✼✱✸✵✢✺✷*]\s+\S+…")
 RESPONSE_MARKER = "⏺ "
 COMPACT_DONE_RE = re.compile(r"^\s*⎿\s+Compacted\b")
+# Known static menu headers — still surfaced verbatim when seen.
 MENU_HEADERS = (
     "Ready to code?",
     "Enable auto mode?",
     "Would you like to proceed?",
     "Trust the files in this folder?",
+)
+# Lines below the option block we treat as boundary markers (not part of the menu).
+_MENU_HINT_PREFIXES = (
+    "Esc ", "Enter ", "Tab ", "shift+tab", "ctrl-", "ctrl+", "↑", "←",
 )
 
 
@@ -26,6 +38,25 @@ def _has_prompt_content(line: str) -> bool:
     if not PROMPT_RE.match(line):
         return False
     return bool(line[2:].strip())
+
+
+def _is_divider(line: str) -> bool:
+    s = line.strip()
+    if not s:
+        return False
+    return set(s) <= set("─╌-═━")
+
+
+def _menu_continuation(line: str) -> bool:
+    """True if `line` plausibly continues an option block (option / description / blank)."""
+    if not line.strip():
+        return True
+    if MENU_OPTION_RE.match(line):
+        return True
+    # Indented description line (AskUserQuestion uses 4+ leading spaces).
+    if line.startswith("    "):
+        return True
+    return False
 
 
 class ClaudeBackend(Backend):
@@ -69,18 +100,20 @@ class ClaudeBackend(Backend):
         return sum(1 for l in pane.splitlines() if DONE_RE.match(l))
 
     def is_busy(self, pane: str) -> bool:
-        lines = pane.splitlines()
-        prompts = sum(1 for l in lines if _has_prompt_content(l))
-        completions = self.done_marker_count(pane)
-        # If a menu is visible, we are not "busy" in the response sense.
+        """Active-work signal: a spinner is rendered and no menu is pending.
+
+        Previously this counted `❯ <content>` lines against `✻ Verb for Ns` lines,
+        which broke whenever (a) a verb contained Unicode (`Sautéed`), (b) plan
+        mode rendered the prompt twice and never emitted a `for Ns` marker, or
+        (c) the menu was up. Spinner-based detection sidesteps all three.
+        """
         if self.is_menu(pane):
             return False
-        return prompts > completions
+        return any(SPINNER_RE.search(l) for l in pane.splitlines())
 
     def is_menu(self, pane: str) -> bool:
-        if not any(h in pane for h in MENU_HEADERS):
-            return False
-        return any(MENU_OPTION_RE.match(l) for l in pane.splitlines())
+        """A menu is on screen if any option line carries the `❯` selector."""
+        return any(MENU_SELECTOR_RE.match(l) for l in pane.splitlines())
 
     def extract_response(self, pane: str) -> str:
         lines = pane.splitlines()
@@ -121,23 +154,76 @@ class ClaudeBackend(Backend):
         return "\n".join(cleaned)
 
     def extract_menu(self, pane: str) -> Menu | None:
+        """Return the on-screen menu by walking out from the `❯` selector.
+
+        We bound option scanning to the contiguous block around the selector so
+        that numbered lines in plan-body content (e.g. `1. Create hello.py at
+        ...`) don't get picked up as options.
+        """
         lines = pane.splitlines()
-        question = ""
-        for h in MENU_HEADERS:
-            for l in lines:
-                if h in l:
-                    question = h
-                    break
-            if question:
+        selector_idx = -1
+        for i, l in enumerate(lines):
+            if MENU_SELECTOR_RE.match(l):
+                selector_idx = i
                 break
+        if selector_idx < 0:
+            return None
+
+        start = selector_idx
+        while start > 0 and MENU_OPTION_RE.match(lines[start - 1]):
+            start -= 1
+
+        end = selector_idx
+        while end + 1 < len(lines):
+            nxt = lines[end + 1]
+            if _is_divider(nxt):
+                break
+            stripped = nxt.strip()
+            if stripped and any(stripped.startswith(p) for p in _MENU_HINT_PREFIXES):
+                break
+            if _menu_continuation(nxt):
+                end += 1
+                continue
+            break
+
         options: list[str] = []
-        for l in lines:
-            m = MENU_OPTION_RE.match(l)
+        for i in range(start, end + 1):
+            m = MENU_OPTION_RE.match(lines[i])
             if m:
                 options.append(m.group(2))
         if not options:
             return None
-        return Menu(question=question or "Choose an option", options=options, raw=pane)
+
+        question = ""
+        for i in range(start - 1, max(-1, start - 25), -1):
+            line = lines[i]
+            stripped = line.strip()
+            if not stripped:
+                continue
+            # Stop at a previous user prompt; the menu's question can't sit
+            # above it.
+            if PROMPT_RE.match(line) and stripped != "❯":
+                break
+            for h in MENU_HEADERS:
+                if h in stripped:
+                    question = h
+                    break
+            if question:
+                break
+            if "?" in stripped:
+                # Take the substring up to the first `?`. Handles questions
+                # embedded in longer paragraphs (e.g. the trust dialog's
+                # "Quick safety check: …trust? (Like…). If not, …first.").
+                question = stripped[: stripped.index("?") + 1]
+                break
+            # Dividers, chips, and chrome lines don't qualify but shouldn't
+            # stop the search — keep walking back until we find a question.
+
+        return Menu(
+            question=question or "Choose an option",
+            options=options,
+            raw=pane,
+        )
 
     def extract_tool_uses(self, pane: str) -> list[dict]:
         out = []

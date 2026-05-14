@@ -36,10 +36,14 @@ def list_sessions(prefix: str = "") -> list[str]:
 
 
 def capture(name: str, *, history: bool = True) -> str:
-    args = ["capture-pane", "-t", name, "-p"]
+    # `-J` joins wrapped lines (so output >pane width round-trips correctly),
+    # but as a side effect preserves the trailing spaces tmux uses to pad
+    # short lines. Strip them per-line so callers see clean text.
+    args = ["capture-pane", "-t", name, "-p", "-J"]
     if history:
         args += ["-S", "-"]
-    return strip_ansi(tmux(*args))
+    raw = strip_ansi(tmux(*args))
+    return "\n".join(l.rstrip() for l in raw.splitlines())
 
 
 def paste(name: str, text: str) -> None:
@@ -58,7 +62,7 @@ def kill_session(name: str) -> bool:
     ).returncode == 0
 
 
-def new_session(name: str, command: list[str], *, width: int = 200, height: int = 50) -> None:
+def new_session(name: str, command: list[str], *, width: int = 500, height: int = 50) -> None:
     tmux(
         "new-session", "-d", "-s", name,
         "-x", str(width), "-y", str(height),
