@@ -1,0 +1,17 @@
+ ▐▛███▜▌   Claude Code v2.1.141
+▝▜█████▛▘  Opus 4.7 (1M context) with high effort · Claude Max
+  ▘▘ ▝▝    /private/tmp/kage-test
+
+❯ use the Bash tool to echo "hi". then say done.
+
+⏺ Bash(echo "hi")
+  ⎿  hi
+
+⏺ done
+
+✻ Cogitated for 4s
+
+──────────────────────────────────────────────────────────────────────────── kage:claude:tool ──
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents

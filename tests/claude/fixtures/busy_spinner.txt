@@ -1,0 +1,12 @@
+ ▐▛███▜▌   Claude Code v2.1.141
+▝▜█████▛▘  Opus 4.7 (1M context) with high effort · Claude Max
+  ▘▘ ▝▝    /private/tmp/kage-test
+
+❯ research what kage means in japanese and elaborate.
+
+──────────────────────────────────────────────────────────────────────────── kage:claude:slow ──
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
+
+· Percolating… (1m 5s · ↓ 102 tokens)

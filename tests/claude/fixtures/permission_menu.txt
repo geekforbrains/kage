@@ -1,0 +1,27 @@
+ ▐▛███▜▌   Claude Code v2.1.141
+▝▜█████▛▘  Opus 4.7 (1M context) with high effort · Claude Max
+  ▘▘ ▝▝    /private/tmp/kage-test
+
+❯ create hello.txt with the text "hi"
+
+⏺ Write(hello.txt)
+  ⎿  Writing 2 lines
+
+╭────────────────────────────────────────────────╮
+│ hello.txt                                      │
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+│   1 hi                                         │
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Do you want to create hello.txt?
+ ❯ 1. Yes
+   2. Yes, allow all edits during this session (shift+tab)
+   3. No
+
+ Esc to cancel · Tab to amend
+
+──────────────────────────────────────────────────────────────────────────── kage:claude:perm ──
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
+
+· Precipitating… (5s · ↓ 102 tokens)

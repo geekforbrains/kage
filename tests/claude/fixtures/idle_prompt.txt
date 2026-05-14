@@ -1,0 +1,8 @@
+ ▐▛███▜▌   Claude Code v2.1.141
+▝▜█████▛▘  Opus 4.7 (1M context) with high effort · Claude Max
+  ▘▘ ▝▝    /private/tmp/kage-test
+
+──────────────────────────────────────────────────────────────────────────── kage:claude:test ──
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
