@@ -22,11 +22,18 @@ the interactive tool, no API key required.
 
 ## Install
 
+Not on PyPI yet. Clone and install from source:
+
 ```bash
-pipx install kage-cli     # recommended
-# or
-pip install kage-cli
+git clone https://github.com/geekforbrains/kage.git
+cd kage
+pipx install .              # recommended
+# or, for a development checkout:
+pip install -e .
 ```
+
+Once a release is cut it will be published as `kage-cli` on PyPI
+(`pipx install kage-cli`).
 
 Requirements:
 
@@ -183,15 +190,20 @@ $ kage claude --json "what is 2+2"
 {"status":"done","backend":"claude","session":null,"session_id":"...","response":"4"}
 ```
 
-When the TUI is waiting on a menu (e.g. plan approval), you get:
+When the TUI is waiting on a menu, you get:
 
 ```json
 {"status":"menu","backend":"claude","session":"work",
  "session_id":"...",
- "menu":{"question":"Ready to code?","options":["...","..."]}}
+ "menu":{"question":"Do you want to create hello.txt?","options":["Yes","Yes, allow all edits during this session (shift+tab)","No"]}}
 ```
 
 The exit code is `10`. Respond with `kage session choose <name> <number>`.
+The same envelope is returned for plan-approval menus, tool-permission
+prompts (when `--dangerously-skip-permissions` is off — kage passes that
+flag by default), Claude's `AskUserQuestion` clarifications, and the
+first-run trust-folder dialog. `question` is whatever Claude wrote;
+match on `options` if you need to dispatch on intent.
 
 ## Library use
 
@@ -229,7 +241,7 @@ with named as s:
    then `Enter` is sent as a separate keystroke (sending them together is
    racy for some TUIs).
 3. `kage` polls the rendered pane and watches for backend-specific markers
-   (e.g. Claude's `Worked for Ns`) to know when the response is complete.
+   (e.g. Claude's `✻ <verb> for Ns`) to know when the response is complete.
 4. The response is parsed out of the rendered TUI and printed to stdout, or
    emitted as JSON events for `--output-format stream-json`.
 5. Interactive menus (plan approval, etc.) are returned as a structured
@@ -251,7 +263,19 @@ Things to know before you wire kage into anything important.
 - **kage parses the rendered TUI.** If the AI CLI changes its prompt
   marker, done marker, tool-call format, or spinner style, kage's
   extraction may break until it's updated. Pin a known-good version of the
-  underlying CLI in production environments.
+  underlying CLI in production environments. `tests/<backend>/fixtures/`
+  contains real pane snapshots used as regression anchors — when an
+  upstream change breaks something, capture the new pane, drop it in as
+  a fixture, and fix parsing until tests pass.
+- **Markdown and code-fence formatting is lost.** kage reads the
+  *rendered* pane, so triple-backtick fences, bold/italic markers, and
+  link syntax are gone by the time we see the text — only the visible
+  characters survive. If your caller needs verbatim model output, you
+  want the API, not kage.
+- **Very long single lines wrap.** The tmux pane is 500 columns wide.
+  Anything longer wraps in Claude's renderer and round-trips as multiple
+  lines. Most prose and code fits; pathological one-liners (single huge
+  JSON blobs, base64, etc.) won't.
 - **Don't type into a kage-managed tmux session mid-call.** You can attach
   with `tmux attach -t kage_<backend>_<slug>` to observe, but if you send
   keys while kage has a request in flight, the next response extraction
@@ -265,6 +289,11 @@ Things to know before you wire kage into anything important.
   model's token stream.** You get periodic snapshots of the rendered
   response, not token-by-token output. Final text is correct; intermediate
   chunks may be larger than a single token.
+- **Some menu choices return DONE with empty text.** When you pick an
+  option that dismisses the menu without generating a new model response
+  (e.g. plan mode's "Tell Claude what to change"), kage returns exit 0
+  with `response: ""`. That's a successful action, not a failure — the
+  next `kage claude --session=...` call resumes normally.
 - **`kage session show` needs the tmux pane to be running.** If you have
   only a state record (e.g. just after a reboot), run a regular
   `kage claude --session=NAME "..."` first to revive the pane.
