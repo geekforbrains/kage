@@ -5,7 +5,7 @@ import os
 import re
 from pathlib import Path
 
-from .base import Backend, Menu
+from .base import Backend, BackendError, Menu
 
 PROMPT_RE = re.compile(r"^❯(?:[\xa0 ]|$)")
 DONE_RE = re.compile(r"^✻ \S+ for \d+s")
@@ -20,6 +20,12 @@ TOOL_CALL_RE = re.compile(
 SPINNER_RE = re.compile(r"^\s*[·✴✦✶✻✼✱✸✵✢✺✷*]\s+\S+…")
 RESPONSE_MARKER = "⏺ "
 COMPACT_DONE_RE = re.compile(r"^\s*⎿\s+Compacted\b")
+LOGIN_ERROR_RE = re.compile(r"\bNot logged in\b|\bPlease run /login\b|\bRun /login\b")
+GENERIC_ERROR_RE = re.compile(
+    r"\b(?:API Error|Authentication error|Unauthorized|Invalid API key|"
+    r"Credit balance|rate limit|permission denied)\b",
+    re.IGNORECASE,
+)
 # Known static menu headers — still surfaced verbatim when seen.
 MENU_HEADERS = (
     "Ready to code?",
@@ -225,6 +231,32 @@ class ClaudeBackend(Backend):
             raw=pane,
         )
 
+    def extract_error(self, pane: str) -> BackendError | None:
+        """Detect Claude diagnostics for the latest submitted prompt."""
+        lines = pane.splitlines()
+        start = 0
+        for i, line in enumerate(lines):
+            if _has_prompt_content(line):
+                start = i + 1
+
+        for i in range(start, len(lines)):
+            clean = _clean_diagnostic_line(lines[i])
+            if not clean:
+                continue
+            if _is_diagnostic_line(lines[i]) and LOGIN_ERROR_RE.search(clean):
+                return BackendError(
+                    message=_collect_diagnostic(lines, i),
+                    reason="not_logged_in",
+                    raw=pane,
+                )
+            if _is_diagnostic_line(lines[i]) and GENERIC_ERROR_RE.search(clean):
+                return BackendError(
+                    message=_collect_diagnostic(lines, i),
+                    reason="backend_error",
+                    raw=pane,
+                )
+        return None
+
     def extract_tool_uses(self, pane: str) -> list[dict]:
         out = []
         for l in pane.splitlines():
@@ -256,3 +288,28 @@ def _is_tool_chrome(line: str) -> bool:
     if TOOL_CALL_RE.match(line):
         return True
     return False
+
+
+def _is_diagnostic_line(line: str) -> bool:
+    s = line.strip().replace("\xa0", " ")
+    return s.startswith(("⎿", "·"))
+
+
+def _clean_diagnostic_line(line: str) -> str:
+    s = line.strip().replace("\xa0", " ")
+    for prefix in ("⎿", "·"):
+        if s.startswith(prefix):
+            s = s[len(prefix):].strip()
+            break
+    return s
+
+
+def _collect_diagnostic(lines: list[str], index: int) -> str:
+    out = [_clean_diagnostic_line(lines[index])]
+    for line in lines[index + 1:index + 5]:
+        if not _is_diagnostic_line(line):
+            break
+        clean = _clean_diagnostic_line(line)
+        if clean:
+            out.append(clean)
+    return "\n".join(out)

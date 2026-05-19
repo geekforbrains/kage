@@ -5,30 +5,40 @@ import re
 import subprocess
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07")
+TMUX_MISSING_MESSAGE = (
+    "tmux not found on PATH. Install tmux (macOS: brew install tmux) "
+    "and ensure it is available to the shell running kage."
+)
+
+
+class TmuxError(RuntimeError):
+    """A tmux command failed before kage could talk to the backend."""
 
 
 def strip_ansi(s: str) -> str:
     return ANSI_RE.sub("", s)
 
 
+def _run_tmux(args: list[str]) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(["tmux", *args], capture_output=True, text=True)
+    except FileNotFoundError as e:
+        raise TmuxError(TMUX_MISSING_MESSAGE) from e
+
+
 def tmux(*args: str, check: bool = True) -> str:
-    r = subprocess.run(["tmux", *args], capture_output=True, text=True)
+    r = _run_tmux(list(args))
     if check and r.returncode != 0:
-        raise RuntimeError(f"tmux {' '.join(args)} failed: {r.stderr.strip()}")
+        raise TmuxError(f"tmux {' '.join(args)} failed: {r.stderr.strip()}")
     return r.stdout
 
 
 def has_session(name: str) -> bool:
-    return subprocess.run(
-        ["tmux", "has-session", "-t", name], capture_output=True
-    ).returncode == 0
+    return _run_tmux(["has-session", "-t", name]).returncode == 0
 
 
 def list_sessions(prefix: str = "") -> list[str]:
-    r = subprocess.run(
-        ["tmux", "list-sessions", "-F", "#{session_name}"],
-        capture_output=True, text=True,
-    )
+    r = _run_tmux(["list-sessions", "-F", "#{session_name}"])
     if r.returncode != 0:
         return []
     names = [n for n in r.stdout.splitlines() if n]
@@ -57,9 +67,7 @@ def send_key(name: str, key: str) -> None:
 
 
 def kill_session(name: str) -> bool:
-    return subprocess.run(
-        ["tmux", "kill-session", "-t", name], capture_output=True
-    ).returncode == 0
+    return _run_tmux(["kill-session", "-t", name]).returncode == 0
 
 
 def new_session(name: str, command: list[str], *, width: int = 500, height: int = 50) -> None:

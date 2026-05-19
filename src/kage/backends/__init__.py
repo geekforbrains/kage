@@ -1,7 +1,7 @@
 """Backend registry."""
 from __future__ import annotations
 
-from .base import Backend, Menu, State
+from .base import Backend, BackendError, Menu, State
 from .claude import ClaudeBackend
 
 _REGISTRY: dict[str, type[Backend]] = {
@@ -19,4 +19,4 @@ def list_backends() -> list[str]:
     return sorted(_REGISTRY)
 
 
-__all__ = ["Backend", "Menu", "State", "get_backend", "list_backends"]
+__all__ = ["Backend", "BackendError", "Menu", "State", "get_backend", "list_backends"]

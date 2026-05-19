@@ -10,7 +10,7 @@ from typing import Iterator
 
 from . import state as state_mod
 from . import tmux as tmuxlib
-from .backends import Backend, Menu, State
+from .backends import Backend, BackendError, Menu, State
 
 SESSION_PREFIX = "kage_"
 _SANITIZE_RE = re.compile(r"[^A-Za-z0-9._-]+")
@@ -31,6 +31,12 @@ class MenuPending(Exception):
 
 class SessionBusy(Exception):
     """The session is mid-response from a previous message."""
+
+
+class BackendFailure(Exception):
+    def __init__(self, error: BackendError):
+        super().__init__(error.message)
+        self.error = error
 
 
 def _sanitize(s: str) -> str:
@@ -287,6 +293,7 @@ class Session:
         while time.time() < deadline:
             time.sleep(poll_interval)
             cur = self.capture()
+            self._raise_backend_error(cur)
             partial = self.backend.extract_response(cur)
             if partial and partial != last_full:
                 if partial.startswith(last_full):
@@ -295,6 +302,8 @@ class Session:
                     yield "\r" + partial
                 last_full = partial
             if self.backend.done_marker_count(cur) > baseline:
+                if not last_full and not self.backend.extract_response(cur):
+                    self._raise_empty_response(cur)
                 return
             if self.backend.is_menu(cur):
                 menu = self.backend.extract_menu(cur)
@@ -333,6 +342,7 @@ class Session:
         while time.time() < deadline:
             time.sleep(poll_interval)
             cur = self.capture()
+            self._raise_backend_error(cur)
             partial = self.backend.extract_response(cur)
             if partial and partial != last_full:
                 if partial.startswith(last_full):
@@ -348,6 +358,8 @@ class Session:
                     yield {"type": "tool_use", **tool}
 
             if self.backend.done_marker_count(cur) > baseline:
+                if not last_full and not self.backend.extract_response(cur):
+                    self._raise_empty_response(cur)
                 yield {
                     "type": "done",
                     "duration_ms": int((time.time() - started_at) * 1000),
@@ -382,6 +394,7 @@ class Session:
         while time.time() < deadline:
             time.sleep(0.5)
             cur = self.capture()
+            self._raise_backend_error(cur)
             if self.backend.done_marker_count(cur) > baseline:
                 if self.record:
                     self.record.last_used_at = _now()
@@ -430,6 +443,7 @@ class Session:
         while time.time() < deadline:
             time.sleep(poll_interval)
             cur = self.capture()
+            self._raise_backend_error(cur)
             if command.startswith("/compact"):
                 if any(COMPACT_DONE_RE.match(l) for l in cur.splitlines()):
                     return SendResult(state=State.DONE, text=_compact_summary(cur))
@@ -467,19 +481,35 @@ class Session:
         while time.time() < deadline:
             time.sleep(poll_interval)
             cur = self.capture()
+            self._raise_backend_error(cur)
             if self.backend.done_marker_count(cur) > baseline:
+                text = self.backend.extract_response(cur)
+                if not text:
+                    self._raise_empty_response(cur)
                 if self.record:
                     self.record.last_used_at = _now()
                     state_mod.upsert(self.record)
                 return SendResult(
                     state=State.DONE,
-                    text=self.backend.extract_response(cur),
+                    text=text,
                 )
             if self.backend.is_menu(cur):
                 menu = self.backend.extract_menu(cur)
                 if menu:
                     return SendResult(state=State.MENU, menu=menu)
         raise TimeoutError(f"no done marker after {timeout}s")
+
+    def _raise_backend_error(self, pane: str) -> None:
+        error = self.backend.extract_error(pane)
+        if error:
+            raise BackendFailure(error)
+
+    def _raise_empty_response(self, pane: str) -> None:
+        raise BackendFailure(BackendError(
+            message="backend completed without a detectable response",
+            reason="empty_response",
+            raw=pane,
+        ))
 
 
 def _compact_summary(pane: str) -> str:

@@ -46,6 +46,7 @@ def fx(name: str) -> str:
         ("trust_dialog", True, False),
         ("subagent_response", False, False),
         ("tool_calls_response", False, False),
+        ("logged_out", False, False),
     ],
 )
 def test_state_classification(backend, fixture, expected_menu, expected_busy):
@@ -88,6 +89,7 @@ def test_ready_marker(backend, fixture, expected_ready):
         ("tool_calls_response", 1),
         ("plan_menu", 0),  # plan mode never emits the done marker
         ("permission_menu", 0),  # menu present, response not done
+        ("logged_out", 1),
     ],
 )
 def test_done_marker_count(backend, fixture, expected_count):
@@ -121,6 +123,19 @@ def test_extract_response_tool_calls_stripped(backend):
 
 def test_extract_response_idle_is_empty(backend):
     assert backend.extract_response(fx("idle_prompt")) == ""
+
+
+def test_logged_out_error(backend):
+    error = backend.extract_error(fx("logged_out"))
+    assert error is not None
+    assert error.reason == "not_logged_in"
+    assert "Not logged in" in error.message
+    assert "security unlock-keychain" in error.message
+
+
+def test_prior_logged_out_error_does_not_poison_new_turn(backend):
+    pane = fx("logged_out") + "\n❯ say ok\n⏺ ok\n✻ Responded for 1s\n❯"
+    assert backend.extract_error(pane) is None
 
 
 # ---------------------------------------------------------------------------

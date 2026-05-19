@@ -18,6 +18,13 @@ class Menu:
     raw: str = ""
 
 
+@dataclass
+class BackendError:
+    message: str
+    reason: str = "backend_error"
+    raw: str = ""
+
+
 class Backend:
     """Subclass per CLI tool. Provides start command and state detection."""
 
@@ -56,6 +63,10 @@ class Backend:
 
     def extract_menu(self, pane: str) -> Menu | None:
         raise NotImplementedError
+
+    def extract_error(self, pane: str) -> BackendError | None:
+        """Return a backend-level diagnostic visible in the current pane."""
+        return None
 
     def extract_tool_uses(self, pane: str) -> list[dict]:
         """Return tool-use events visible in the current pane.

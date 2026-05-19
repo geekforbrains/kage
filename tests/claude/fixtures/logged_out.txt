@@ -1,0 +1,21 @@
+╭─── Claude Code v2.1.144 ─────────────────────────────────────────────────────────────────────────────╮
+│                                      Welcome back Test User!                                         │
+│                                                                                                      │
+│                                       ▐▛███▜▌                                                       │
+│                                      ▝▜█████▛▘                                                      │
+│                                        ▘▘ ▝▝                                                        │
+│                 Opus 4.7 (1M context) with high effort · API Usage Billing                          │
+│                                      /private/tmp/kage-test                                         │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+❯ hello?
+  ⎿  Not logged in · Please run /login
+     · Run in another terminal: security unlock-keychain
+
+✻ Cogitated for 0s
+
+──────────────────────────────────────────────────────────────────────── kage:claude:loggedout ──
+❯
+──────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents                  Not logged in · Run /login
+                                                                         ● high · /effort

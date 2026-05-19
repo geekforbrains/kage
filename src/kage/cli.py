@@ -8,8 +8,10 @@ import subprocess
 import sys
 
 from . import __version__
+from . import tmux as tmuxlib
 from .backends import get_backend, list_backends
 from .session import (
+    BackendFailure,
     MenuPending,
     Session,
     SessionBusy,
@@ -103,6 +105,28 @@ def _emit_event(event: dict) -> None:
     print(json.dumps(event), flush=True)
 
 
+def _emit_error(
+    *,
+    mode: str,
+    backend: str,
+    session: str | None,
+    session_id: str | None,
+    reason: str,
+    message: str,
+) -> None:
+    if mode == "json":
+        print(json.dumps({
+            "status": "error",
+            "backend": backend,
+            "session": session,
+            "session_id": session_id,
+            "reason": reason,
+            "message": message,
+        }))
+    else:
+        print(f"error: {message}", file=sys.stderr)
+
+
 # --- session resolution ---
 
 def _build_session(args: argparse.Namespace, backend_name: str) -> tuple[Session, bool]:
@@ -174,6 +198,16 @@ def _run_send(sess: Session, message: str, args, backend_name: str, mode: str) -
     except SessionBusy as e:
         print(f"error: {e}", file=sys.stderr)
         return EXIT_BUSY
+    except BackendFailure as e:
+        _emit_error(
+            mode=mode,
+            backend=backend_name,
+            session=args.session,
+            session_id=sess.session_id,
+            reason=e.error.reason,
+            message=e.error.message,
+        )
+        return EXIT_ERROR
     except TimeoutError as e:
         print(f"error: {e}", file=sys.stderr)
         return EXIT_TIMEOUT
@@ -200,6 +234,9 @@ def _run_stream_text(sess: Session, message: str, args, backend_name: str) -> in
     except SessionBusy as e:
         print(f"error: {e}", file=sys.stderr)
         return EXIT_BUSY
+    except BackendFailure as e:
+        print(f"\nerror: {e.error.message}", file=sys.stderr)
+        return EXIT_ERROR
     except MenuPending as e:
         print()
         _emit_menu(e.menu, mode="text", backend=backend_name,
@@ -226,6 +263,13 @@ def _run_stream_json(sess: Session, message: str, args) -> int:
     except SessionBusy as e:
         _emit_event({"type": "error", "message": str(e), "reason": "busy"})
         return EXIT_BUSY
+    except BackendFailure as e:
+        _emit_event({
+            "type": "error",
+            "message": e.error.message,
+            "reason": e.error.reason,
+        })
+        return EXIT_ERROR
     except TimeoutError as e:
         _emit_event({"type": "error", "message": str(e), "reason": "timeout"})
         return EXIT_TIMEOUT
@@ -383,6 +427,16 @@ def cmd_session_choose(args: argparse.Namespace) -> int:
         choice = args.choice
     try:
         result = sess.respond_to_menu(choice)
+    except BackendFailure as e:
+        _emit_error(
+            mode="json" if args.json else "text",
+            backend=backend_name,
+            session=name,
+            session_id=sess.session_id,
+            reason=e.error.reason,
+            message=e.error.message,
+        )
+        return EXIT_ERROR
     except TimeoutError as e:
         print(f"error: {e}", file=sys.stderr)
         return EXIT_TIMEOUT
@@ -407,6 +461,16 @@ def cmd_session_compact(args: argparse.Namespace) -> int:
         return EXIT_ERROR
     try:
         result = sess.slash("/compact", timeout=args.timeout)
+    except BackendFailure as e:
+        _emit_error(
+            mode="json" if args.json else "text",
+            backend=rec.backend,
+            session=args.name,
+            session_id=sess.session_id,
+            reason=e.error.reason,
+            message=e.error.message,
+        )
+        return EXIT_ERROR
     except TimeoutError as e:
         print(f"error: {e}", file=sys.stderr)
         return EXIT_TIMEOUT
@@ -591,7 +655,11 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except tmuxlib.TmuxError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return EXIT_ERROR
 
 
 if __name__ == "__main__":

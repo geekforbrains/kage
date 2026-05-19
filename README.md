@@ -177,7 +177,7 @@ kage session clear work      # clear context: kill tmux + new UUID, same name
 | Code | Meaning |
 |------|---------|
 | 0    | Success |
-| 1    | Error (session crashed, backend missing, etc.) |
+| 1    | Error (session crashed, backend missing, not logged in, empty response, etc.) |
 | 2    | Usage error |
 | 10   | Menu pending, awaiting input |
 | 11   | Session busy and `--no-wait` was set |
@@ -204,6 +204,15 @@ prompts (when `--dangerously-skip-permissions` is off — kage passes that
 flag by default), Claude's `AskUserQuestion` clarifications, and the
 first-run trust-folder dialog. `question` is whatever Claude wrote;
 match on `options` if you need to dispatch on intent.
+
+When the backend reports a terminal error, JSON mode returns an error
+envelope and exits `1`:
+
+```json
+{"status":"error","backend":"claude","session":null,
+ "session_id":"...","reason":"not_logged_in",
+ "message":"Not logged in · Please run /login"}
+```
 
 ## Library use
 
