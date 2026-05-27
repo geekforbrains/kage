@@ -2,10 +2,14 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
+import os
+import select
 import shutil
 import subprocess
 import sys
+import time
 
 from . import __version__
 from . import tmux as tmuxlib
@@ -30,15 +34,69 @@ EXIT_TIMEOUT = 124
 
 # --- input/output helpers ---
 
+def _read_available(fd: int, timeout: float = 0.2) -> str:
+    """Read whatever is already on `fd` without blocking on EOF.
+
+    Used when a message argument is present and stdin is only optional context:
+    a plain ``sys.stdin.read()`` would block forever if the caller holds stdin
+    open without sending EOF (a parent agent, an inherited pipe, a fifo). We
+    drain what's ready and stop, rather than waiting for a close that may never
+    come.
+    """
+    try:
+        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+    except (OSError, ValueError):
+        return ""  # not a real/selectable fd; skip optional stdin
+    chunks: list[bytes] = []
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                ready, _, _ = select.select([fd], [], [], remaining)
+            except (OSError, ValueError):
+                break
+            if not ready:
+                break
+            try:
+                data = os.read(fd, 65536)
+            except BlockingIOError:
+                continue
+            except OSError:
+                break
+            if not data:
+                break  # EOF
+            chunks.append(data)
+    finally:
+        try:
+            fcntl.fcntl(fd, fcntl.F_SETFL, flags)
+        except (OSError, ValueError):
+            pass
+    return b"".join(chunks).decode("utf-8", "replace")
+
+
 def _resolve_message(args: argparse.Namespace) -> str:
     parts: list[str] = []
-    if getattr(args, "message", None):
-        parts.append(args.message)
+    message = getattr(args, "message", None)
+    if message:
+        parts.append(message)
     if not sys.stdin.isatty():
-        try:
-            stdin_data = sys.stdin.read()
-        except Exception:
-            stdin_data = ""
+        if message:
+            # stdin is optional context here — never block waiting for EOF.
+            try:
+                fd = sys.stdin.fileno()
+            except (OSError, ValueError, AttributeError):
+                fd = None
+            stdin_data = _read_available(fd) if fd is not None else ""
+        else:
+            # No message argument: stdin IS the message, so block for it.
+            try:
+                stdin_data = sys.stdin.read()
+            except Exception:
+                stdin_data = ""
         if stdin_data.strip():
             parts.append(stdin_data.rstrip())
     if not parts:
