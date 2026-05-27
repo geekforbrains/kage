@@ -125,6 +125,15 @@ def test_no_wait_reports_busy(session):
         slow.wait(timeout=150)
 
 
+def test_prune_stops_idle_session(session):
+    r = run("claude", "--session", session, "reply with only: hi")
+    assert r.returncode == 0, r.stderr
+    # everything is "idle" past a 0s threshold; our session should be stopped
+    p = run("session", "prune", "--older-than", "0s", "--json", timeout=60)
+    assert p.returncode == 0, p.stderr
+    assert session in json.loads(p.stdout)["stopped"]
+
+
 def test_stdin_arg_with_open_pipe_does_not_hang(session):
     """Regression: message arg + stdin held open (no EOF) must not block."""
     r_fd, w_fd = os.pipe()  # writer end stays open -> never EOFs

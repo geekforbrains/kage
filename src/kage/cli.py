@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
 import fcntl
 import json
 import os
@@ -516,6 +517,54 @@ def cmd_session_compact(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_session_prune(args: argparse.Namespace) -> int:
+    """Stop sessions idle past a TTL and reap orphaned hook/event artifacts."""
+    from . import session as _sess
+
+    try:
+        ttl = _sess.parse_duration(args.older_than)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return EXIT_USAGE
+
+    now_dt = _dt.datetime.now(_dt.timezone.utc)
+    now_epoch = time.time()
+    dry = getattr(args, "dry_run", False)
+
+    stale = _sess.plan_idle_records(list(known_records()), now_dt, ttl)
+    stopped: list[str] = []
+    for rec in stale:
+        sess = Session.named(rec.name, get_backend(rec.backend))
+        if not dry:
+            sess.stop()
+        stopped.append(rec.name)
+
+    running = _sess.list_sessions()
+    running_tmux = {f"{_sess.SESSION_PREFIX}{b}_{slug}" for b, slug in running}
+    orphans = _sess.find_orphan_artifacts(running_tmux, now=now_epoch, ttl=ttl)
+    removed: list[str] = []
+    for p in orphans:
+        if not dry:
+            try:
+                p.unlink()
+            except OSError:
+                pass
+        removed.append(str(p))
+
+    if getattr(args, "json", False):
+        print(json.dumps({"stopped": stopped, "removed_artifacts": removed, "dry_run": dry}))
+        return EXIT_OK
+    stop_verb = "would stop" if dry else "stopped"
+    rm_verb = "would remove" if dry else "removed"
+    for n in stopped:
+        print(f"{stop_verb}: {n}")
+    for p in removed:
+        print(f"{rm_verb} artifact: {p}")
+    if not stopped and not removed:
+        print("nothing to prune")
+    return EXIT_OK
+
+
 def cmd_session_clear(args: argparse.Namespace) -> int:
     rec = state_mod.get(args.name)
     if not rec:
@@ -605,7 +654,8 @@ def _add_backend_subparser(sub, backend_name: str) -> None:
     p.add_argument("--session-id", default=None,
                    help="bind to a specific conversation UUID (caller-managed)")
     p.add_argument("--timeout", "-t", type=float, default=120.0,
-                   help="seconds to wait for response (default 120)")
+                   help="seconds to wait for a response (default 120). Raise it "
+                        "for long agentic turns; on expiry kage exits 124.")
     p.add_argument("--system-prompt", default=None,
                    help="appended to backend system prompt (session-start only)")
     p.add_argument("--bare", action="store_true",
@@ -681,6 +731,17 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("name")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_session_clear)
+
+    p = sess_sub.add_parser(
+        "prune",
+        help="stop idle sessions and reap orphaned hook/event artifacts",
+    )
+    p.add_argument("--older-than", default="24h",
+                   help="idle threshold: e.g. 30m, 2h, 7d, or seconds (default 24h)")
+    p.add_argument("--dry-run", action="store_true",
+                   help="show what would be pruned without stopping or deleting")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_session_prune)
 
     p = sub.add_parser("backends", help="list available backends")
     p.add_argument("--json", action="store_true")

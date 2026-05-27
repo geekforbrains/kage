@@ -57,6 +57,71 @@ def _now() -> str:
     return _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
 
 
+_DURATION_RE = re.compile(r"^(\d+)([smhd]?)$")
+_DURATION_UNIT = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def parse_duration(text: str) -> int:
+    """Parse a duration like '30m', '2h', '7d', or bare seconds into seconds."""
+    m = _DURATION_RE.match((text or "").strip())
+    if not m:
+        raise ValueError(f"invalid duration: {text!r} (use e.g. 30m, 2h, 7d, or seconds)")
+    return int(m.group(1)) * _DURATION_UNIT[m.group(2)]
+
+
+def _record_idle_seconds(record, now: _dt.datetime) -> float | None:
+    """Seconds since a record was last used, or None if it has no usable date."""
+    stamp = record.last_used_at or record.created_at
+    if not stamp:
+        return None
+    try:
+        when = _dt.datetime.fromisoformat(stamp)
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=_dt.timezone.utc)
+    return (now - when).total_seconds()
+
+
+def plan_idle_records(records, now: _dt.datetime, ttl: int) -> list:
+    """Records whose idle time is strictly greater than `ttl` seconds."""
+    stale = []
+    for r in records:
+        idle = _record_idle_seconds(r, now)
+        if idle is not None and idle > ttl:
+            stale.append(r)
+    return stale
+
+
+def find_orphan_artifacts(running_tmux_names, *, now: float, ttl: int) -> list:
+    """Leaked per-session artifacts safe to delete (e.g. after a crash).
+
+    - a hooks settings file whose tmux session is no longer running
+    - an events log not modified within `ttl` seconds (a live session keeps
+      its log's mtime fresh)
+    """
+    running = set(running_tmux_names)
+    orphans: list = []
+
+    hooks_dir = state_mod._state_dir() / "hooks"
+    if hooks_dir.is_dir():
+        for p in hooks_dir.glob("*.json"):
+            if p.stem not in running:
+                orphans.append(p)
+
+    events_dir = state_mod._state_dir() / "events"
+    if events_dir.is_dir():
+        for p in events_dir.glob("*.jsonl"):
+            try:
+                mtime = p.stat().st_mtime
+            except OSError:
+                continue
+            if now - mtime > ttl:
+                orphans.append(p)
+
+    return orphans
+
+
 class Session:
     """A persistent conversation with a single backend, running in tmux.
 
