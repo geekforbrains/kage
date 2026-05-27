@@ -300,9 +300,14 @@ class Session:
                     return SendResult(state=State.MENU, menu=menu)
             self._await_idle(wait_if_busy, wait_busy_timeout, poll_interval)
             tail = None
+            resp_baseline = 0
             if on_event is not None:
                 tail = hooks_mod.EventTail(self.events_file)
                 tail.seek_to_end()
+                if self.session_id:
+                    # Count existing answers so a stale prior one isn't returned
+                    # if Stop fires before this turn's text is flushed.
+                    resp_baseline = self.backend.transcript_text_count(self.session_id)
             baseline = self._submit(message)
             return self._wait(
                 baseline=baseline,
@@ -310,6 +315,7 @@ class Session:
                 poll_interval=poll_interval,
                 tail=tail,
                 on_event=on_event,
+                resp_baseline=resp_baseline,
             )
 
     def respond_to_menu(self, choice: int | str, *, timeout: float = 120.0) -> SendResult:
@@ -442,6 +448,7 @@ class Session:
         poll_interval: float,
         tail=None,
         on_event=None,
+        resp_baseline: int = 0,
     ) -> SendResult:
         deadline = time.time() + timeout
         stop_seen_at: float | None = None
@@ -470,11 +477,15 @@ class Session:
             # (verbatim), falling back to the pane scrape.
             done = self.backend.done_marker_count(cur) > baseline
             if stop_seen_at is not None or done:
-                # Progress mode (tail set) prefers the verbatim transcript;
-                # the default path stays pure pane-scraping for clean A/B.
+                # Progress mode (tail set) prefers the verbatim transcript, but
+                # only once this turn's answer has actually been flushed (the
+                # text count advanced past the pre-submit baseline) — otherwise
+                # we'd return the previous turn's stale answer. The default path
+                # stays pure pane-scraping for clean A/B.
                 text = None
                 if tail is not None and self.session_id:
-                    text = self.backend.final_response(self.session_id)
+                    if self.backend.transcript_text_count(self.session_id) > resp_baseline:
+                        text = self.backend.final_response(self.session_id)
                 if not text:
                     text = self.backend.extract_response(cur)
                 if not text:

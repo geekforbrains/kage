@@ -80,6 +80,10 @@ class ClaudeBackend(Backend):
         effort: str | None = None,
         settings: str | None = None,
     ) -> list[str]:
+        # --dangerously-skip-permissions is required, not optional: without it
+        # every tool call raises a permission menu that would block a scripted,
+        # non-interactive caller. kage is built to drive trusted automation, so
+        # it always bypasses permission prompts.
         cmd = ["claude", "--dangerously-skip-permissions"]
         if settings:
             cmd += ["--settings", settings]
@@ -262,19 +266,14 @@ class ClaudeBackend(Backend):
         return None
 
 
-    def final_response(self, session_id: str) -> str | None:
-        """Last assistant text block(s) from the session's JSONL transcript.
-
-        The transcript stores verbatim content blocks, so this avoids the
-        rendered-pane losses (markdown, line-wrap, tool chrome). Returns the
-        text of the last assistant message that contains any text block.
-        """
+    def _assistant_texts(self, session_id: str) -> list[str]:
+        """Text of each text-bearing assistant message, in transcript order."""
         path = _conversation_file(session_id)
         try:
             lines = path.read_text().splitlines()
         except OSError:
-            return None
-        latest: str | None = None
+            return []
+        out: list[str] = []
         for line in lines:
             line = line.strip()
             if not line:
@@ -295,8 +294,27 @@ class ClaudeBackend(Backend):
             ]
             joined = "\n".join(t for t in texts if t).strip()
             if joined:
-                latest = joined
-        return latest
+                out.append(joined)
+        return out
+
+    def final_response(self, session_id: str) -> str | None:
+        """Last assistant text block(s) from the session's JSONL transcript.
+
+        The transcript stores verbatim content blocks, so this avoids the
+        rendered-pane losses (markdown, line-wrap, tool chrome). Returns the
+        text of the last assistant message that contains any text block.
+        """
+        texts = self._assistant_texts(session_id)
+        return texts[-1] if texts else None
+
+    def transcript_text_count(self, session_id: str) -> int:
+        """How many text-bearing assistant messages the transcript holds.
+
+        Baselined before a turn so the caller can tell a freshly-flushed answer
+        from a stale prior one: a `final_response` is only trustworthy once this
+        count has advanced past its pre-submit value.
+        """
+        return len(self._assistant_texts(session_id))
 
 
 def _conversation_file(session_id: str) -> Path:

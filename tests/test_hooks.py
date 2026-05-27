@@ -120,3 +120,58 @@ def test_final_response_reads_last_assistant_text(tmp_path, monkeypatch):
 
 def test_final_response_missing_transcript_returns_none():
     assert ClaudeBackend().final_response("no-such-session-id") is None
+
+
+def _write_transcript(tmp_path, monkeypatch, rows):
+    """Write a fake transcript at the cwd-derived path and return session_id."""
+    import os
+    from kage.backends import claude as cl
+    monkeypatch.setattr(os, "getcwd", lambda: str(tmp_path))
+    sid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    monkeypatch.setattr(cl.Path, "home", classmethod(lambda cls: tmp_path / ".home"))
+    f = cl._conversation_file(sid)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text("\n".join(json.dumps(r) for r in rows) + ("\n" if rows else ""))
+    return sid
+
+
+def _assistant_text(t):
+    return {"type": "assistant", "message": {"content": [{"type": "text", "text": t}]}}
+
+
+def _assistant_tool(name):
+    return {"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": name, "input": {}}]}}
+
+
+def test_transcript_text_count_counts_only_text_messages(tmp_path, monkeypatch):
+    sid = _write_transcript(tmp_path, monkeypatch, [
+        _assistant_text("turn one answer"),
+        _assistant_tool("Bash"),            # not text -> not counted
+        _assistant_text("turn two answer"),
+    ])
+    b = ClaudeBackend()
+    assert b.transcript_text_count(sid) == 2
+    assert b.final_response(sid) == "turn two answer"
+
+
+def test_transcript_text_count_zero_for_missing():
+    assert ClaudeBackend().transcript_text_count("no-such-id") == 0
+
+
+def test_count_baseline_distinguishes_new_from_stale(tmp_path, monkeypatch):
+    """Guards the stale-response race: a not-yet-advanced count means the new
+    turn's answer hasn't flushed, so final_response would be stale."""
+    sid = _write_transcript(tmp_path, monkeypatch, [_assistant_text("old answer")])
+    b = ClaudeBackend()
+    baseline = b.transcript_text_count(sid)
+    assert baseline == 1
+    # before the new turn flushes, count has not advanced -> don't trust it
+    assert b.transcript_text_count(sid) == baseline
+    # after the new turn flushes a fresh answer, count advances
+    from kage.backends import claude as cl
+    f = cl._conversation_file(sid)
+    with f.open("a") as fh:
+        fh.write(json.dumps(_assistant_text("fresh answer")) + "\n")
+    assert b.transcript_text_count(sid) > baseline
+    assert b.final_response(sid) == "fresh answer"

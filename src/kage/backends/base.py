@@ -76,3 +76,11 @@ class Backend:
         progress path. Returns None when the backend has no transcript concept.
         """
         return None
+
+    def transcript_text_count(self, session_id: str) -> int:
+        """Count of assistant text messages in the transcript (0 if none/N/A).
+
+        Baselined before a turn so `final_response` can be distinguished from a
+        stale prior answer (see the claude backend).
+        """
+        return 0
