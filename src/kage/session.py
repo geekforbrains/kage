@@ -9,9 +9,14 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 
+from . import hooks as hooks_mod
 from . import state as state_mod
 from . import tmux as tmuxlib
 from .backends import Backend, BackendError, Menu, State
+
+# Grace period after a Stop hook fires for the pane/transcript to settle before
+# we give up trying to extract the response.
+_STOP_GRACE = 4.0
 
 SESSION_PREFIX = "kage_"
 _SANITIZE_RE = re.compile(r"[^A-Za-z0-9._-]+")
@@ -150,6 +155,11 @@ class Session:
     def tmux_name(self) -> str:
         return f"{SESSION_PREFIX}{self.backend.name}_{self.slug}"
 
+    @property
+    def events_file(self):
+        """Append-only hook-event log for this session's underlying UUID."""
+        return state_mod.events_path(self.session_id or "anon")
+
     def _display_name(self) -> str:
         if self.name:
             return f"kage:{self.backend.name}:{self.name}"
@@ -166,6 +176,10 @@ class Session:
     def exists(self) -> bool:
         return tmuxlib.has_session(self.tmux_name)
 
+    def has_progress_hooks(self) -> bool:
+        """True if this session was started with kage's progress hooks."""
+        return state_mod.hooks_settings_path(self.tmux_name).exists()
+
     # ---- lifecycle ----
 
     def start(
@@ -175,6 +189,7 @@ class Session:
         bare: bool | None = None,
         model: str | None = None,
         effort: str | None = None,
+        progress: bool = False,
         ready_timeout: float = 20.0,
     ) -> None:
         if self.exists():
@@ -187,6 +202,13 @@ class Session:
         cfg_effort = effort or (rec.effort if rec else None)
         cfg_prompt = system_prompt or (rec.system_prompt if rec else None)
 
+        settings = None
+        if progress and not cfg_bare:
+            # --bare skips hooks entirely, so progress only applies otherwise.
+            settings_file = state_mod.hooks_settings_path(self.tmux_name)
+            hooks_mod.write_settings_file(settings_file, self.events_file)
+            settings = str(settings_file)
+
         cmd = self.backend.start_command(
             session_id=self.session_id,
             display_name=self._display_name(),
@@ -194,6 +216,7 @@ class Session:
             bare=cfg_bare,
             model=cfg_model,
             effort=cfg_effort,
+            settings=settings,
         )
         tmuxlib.new_session(self.tmux_name, cmd, width=self.width, height=self.height)
         deadline = time.time() + ready_timeout
@@ -211,7 +234,15 @@ class Session:
         raise RuntimeError(f"backend did not become ready in {ready_timeout}s")
 
     def stop(self) -> bool:
-        return tmuxlib.kill_session(self.tmux_name)
+        killed = tmuxlib.kill_session(self.tmux_name)
+        # Drop the per-session hook artifacts so a later non-progress session
+        # reusing this name isn't mistaken for a progress-enabled one.
+        for p in (state_mod.hooks_settings_path(self.tmux_name), self.events_file):
+            try:
+                p.unlink()
+            except OSError:
+                pass
+        return killed
 
     def forget(self) -> None:
         """Remove the persisted record (no-op for unnamed sessions)."""
@@ -254,6 +285,7 @@ class Session:
         poll_interval: float = 0.5,
         wait_if_busy: bool = True,
         wait_busy_timeout: float = 30.0,
+        on_event=None,
     ) -> SendResult:
         if not self.exists():
             raise RuntimeError(f"no session: {self.tmux_name}")
@@ -267,11 +299,17 @@ class Session:
                 if menu:
                     return SendResult(state=State.MENU, menu=menu)
             self._await_idle(wait_if_busy, wait_busy_timeout, poll_interval)
+            tail = None
+            if on_event is not None:
+                tail = hooks_mod.EventTail(self.events_file)
+                tail.seek_to_end()
             baseline = self._submit(message)
             return self._wait(
                 baseline=baseline,
                 timeout=timeout,
                 poll_interval=poll_interval,
+                tail=tail,
+                on_event=on_event,
             )
 
     def respond_to_menu(self, choice: int | str, *, timeout: float = 120.0) -> SendResult:
@@ -402,27 +440,54 @@ class Session:
         baseline: int,
         timeout: float,
         poll_interval: float,
+        tail=None,
+        on_event=None,
     ) -> SendResult:
         deadline = time.time() + timeout
+        stop_seen_at: float | None = None
         while time.time() < deadline:
             time.sleep(poll_interval)
             cur = self.capture()
             self._raise_backend_error(cur)
-            if self.backend.done_marker_count(cur) > baseline:
-                text = self.backend.extract_response(cur)
-                if not text:
-                    self._raise_empty_response(cur)
-                if self.record:
-                    self.record.last_used_at = _now()
-                    state_mod.upsert(self.record)
-                return SendResult(
-                    state=State.DONE,
-                    text=text,
-                )
+
+            # Surface live progress events as they're appended by the hooks.
+            if tail is not None:
+                for ev in tail.poll():
+                    if on_event is not None:
+                        on_event(ev)
+                if tail.saw_stop and stop_seen_at is None:
+                    stop_seen_at = time.time()
+
+            # A menu pauses the turn (the Stop hook deliberately won't fire);
+            # detect it from the pane regardless of mode.
             if self.backend.is_menu(cur):
                 menu = self.backend.extract_menu(cur)
                 if menu:
                     return SendResult(state=State.MENU, menu=menu)
+
+            # Done either via the Stop hook (preferred when present) or the
+            # rendered done-marker. Prefer the transcript for the response text
+            # (verbatim), falling back to the pane scrape.
+            done = self.backend.done_marker_count(cur) > baseline
+            if stop_seen_at is not None or done:
+                # Progress mode (tail set) prefers the verbatim transcript;
+                # the default path stays pure pane-scraping for clean A/B.
+                text = None
+                if tail is not None and self.session_id:
+                    text = self.backend.final_response(self.session_id)
+                if not text:
+                    text = self.backend.extract_response(cur)
+                if not text:
+                    # Stop fired but neither source has text yet; allow the
+                    # pane/transcript a brief grace before declaring empty.
+                    if stop_seen_at is not None and not done \
+                            and time.time() - stop_seen_at < _STOP_GRACE:
+                        continue
+                    self._raise_empty_response(cur)
+                if self.record:
+                    self.record.last_used_at = _now()
+                    state_mod.upsert(self.record)
+                return SendResult(state=State.DONE, text=text)
         raise TimeoutError(f"no done marker after {timeout}s")
 
     def _raise_backend_error(self, pane: str) -> None:

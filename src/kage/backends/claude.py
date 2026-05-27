@@ -1,6 +1,7 @@
 """Claude Code backend."""
 from __future__ import annotations
 
+import json
 import os
 import re
 from pathlib import Path
@@ -77,8 +78,11 @@ class ClaudeBackend(Backend):
         bare: bool = False,
         model: str | None = None,
         effort: str | None = None,
+        settings: str | None = None,
     ) -> list[str]:
         cmd = ["claude", "--dangerously-skip-permissions"]
+        if settings:
+            cmd += ["--settings", settings]
         if session_id:
             if _conversation_file(session_id).exists():
                 cmd += ["--resume", session_id]
@@ -256,6 +260,43 @@ class ClaudeBackend(Backend):
                     raw=pane,
                 )
         return None
+
+
+    def final_response(self, session_id: str) -> str | None:
+        """Last assistant text block(s) from the session's JSONL transcript.
+
+        The transcript stores verbatim content blocks, so this avoids the
+        rendered-pane losses (markdown, line-wrap, tool chrome). Returns the
+        text of the last assistant message that contains any text block.
+        """
+        path = _conversation_file(session_id)
+        try:
+            lines = path.read_text().splitlines()
+        except OSError:
+            return None
+        latest: str | None = None
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            if rec.get("type") != "assistant":
+                continue
+            content = (rec.get("message") or {}).get("content")
+            if not isinstance(content, list):
+                continue
+            texts = [
+                b.get("text", "")
+                for b in content
+                if isinstance(b, dict) and b.get("type") == "text"
+            ]
+            joined = "\n".join(t for t in texts if t).strip()
+            if joined:
+                latest = joined
+        return latest
 
 
 def _conversation_file(session_id: str) -> Path:

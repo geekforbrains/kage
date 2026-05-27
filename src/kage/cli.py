@@ -143,6 +143,7 @@ def cmd_backend(args: argparse.Namespace, backend_name: str) -> int:
     mode = _output_mode(args)
     sess, cleanup_after = _build_session(args, backend_name)
 
+    progress = getattr(args, "progress", False)
     if not sess.exists():
         try:
             sess.start(
@@ -150,6 +151,7 @@ def cmd_backend(args: argparse.Namespace, backend_name: str) -> int:
                 bare=args.bare,
                 model=args.model,
                 effort=args.effort,
+                progress=progress,
             )
         except Exception as e:
             # Another kage process may have created the same tmux session
@@ -172,20 +174,42 @@ def cmd_backend(args: argparse.Namespace, backend_name: str) -> int:
                     f"warning: --{flag.replace('_', '-')} ignored (session already running)",
                     file=sys.stderr,
                 )
+        if progress and not sess.has_progress_hooks():
+            print(
+                "warning: --progress needs a session started with it; "
+                "hooks are registered at startup. Run "
+                f"`kage session rm {args.session or '<name>'}` and retry for live events.",
+                file=sys.stderr,
+            )
+            progress = False
 
     try:
-        return _run_send(sess, message, args, backend_name, mode)
+        return _run_send(sess, message, args, backend_name, mode, progress=progress)
     finally:
         if cleanup_after:
             sess.stop()
 
 
-def _run_send(sess: Session, message: str, args, backend_name: str, mode: str) -> int:
+def _progress_printer():
+    """Return an on_event callback that prints live activity to stderr."""
+    def _on_event(ev) -> None:
+        if ev.event == "PreToolUse":
+            if ev.tool == "AskUserQuestion":
+                line = f"  ? {ev.summary}" if ev.summary else "  ? (asking)"
+            else:
+                line = f"  → {ev.tool}" + (f"  {ev.summary}" if ev.summary else "")
+            print(line, file=sys.stderr, flush=True)
+    return _on_event
+
+
+def _run_send(sess: Session, message: str, args, backend_name: str, mode: str,
+              *, progress: bool = False) -> int:
     try:
         result = sess.send(
             message,
             timeout=args.timeout,
             wait_if_busy=not args.no_wait,
+            on_event=_progress_printer() if progress else None,
         )
     except SessionBusy as e:
         _emit_error(
@@ -460,6 +484,13 @@ def cmd_backends(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_hook(args: argparse.Namespace) -> int:
+    """Append a hook-event record. Invoked by Claude Code, reads payload stdin."""
+    from pathlib import Path
+    from . import hooks as hooks_mod
+    return hooks_mod.handle_hook(args.event, Path(args.events_file))
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     checks: list[tuple[str, bool, str]] = []
 
@@ -531,6 +562,9 @@ def _add_backend_subparser(sub, backend_name: str) -> None:
                    help="shorthand for --output-format=json")
     p.add_argument("--no-wait", action="store_true",
                    help="exit with code 11 instead of waiting if session is busy")
+    p.add_argument("--progress", action="store_true",
+                   help="stream live tool-use activity to stderr (hooks; "
+                        "session must be started with this flag)")
     p.set_defaults(func=lambda a, bn=backend_name: cmd_backend(a, bn))
 
 
@@ -597,6 +631,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("doctor", help="check environment and dependencies")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_doctor)
+
+    # Internal: invoked by Claude Code hooks (see kage.hooks). Not for direct use.
+    p = sub.add_parser("hook", help=argparse.SUPPRESS)
+    p.add_argument("event")
+    p.add_argument("--events-file", required=True)
+    p.set_defaults(func=cmd_hook)
 
     return parser
 

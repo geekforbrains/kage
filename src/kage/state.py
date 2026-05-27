@@ -30,6 +30,20 @@ def lock_path(name: str) -> Path:
     return d / f"{name}.lock"
 
 
+def events_path(session_id: str) -> Path:
+    """Append-only hook-event log for a backend session (one line per firing)."""
+    d = _state_dir() / "events"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f"{session_id}.jsonl"
+
+
+def hooks_settings_path(tmux_name: str) -> Path:
+    """Per-session settings JSON registering kage's progress hooks."""
+    d = _state_dir() / "hooks"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f"{tmux_name}.json"
+
+
 @dataclass
 class SessionRecord:
     name: str

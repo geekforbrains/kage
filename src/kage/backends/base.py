@@ -39,6 +39,7 @@ class Backend:
         bare: bool = False,
         model: str | None = None,
         effort: str | None = None,
+        settings: str | None = None,
     ) -> list[str]:
         raise NotImplementedError
 
@@ -66,4 +67,12 @@ class Backend:
 
     def extract_error(self, pane: str) -> BackendError | None:
         """Return a backend-level diagnostic visible in the current pane."""
+        return None
+
+    def final_response(self, session_id: str) -> str | None:
+        """Final assistant text for a session from its own transcript, if any.
+
+        Read-only structured source (no rendering loss), used by the hook-driven
+        progress path. Returns None when the backend has no transcript concept.
+        """
         return None
