@@ -1,0 +1,15 @@
+ ▐▛███▜▌   Claude Code v2.1.152
+▝▜█████▛▘  Opus 4.7 (1M context) with high effort · Claude Max
+  ▘▘ ▝▝    ~/Projects/kage
+❯ Use a single AskUserQuestion call with TWO questions: tabs or spaces, and favorite color.
+────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☐ Indentation  ☐ Color  ✔ Submit  →
+Tabs or spaces for indentation?
+❯ 1. Tabs
+     Use tab characters for indentation.
+  2. Spaces
+     Use space characters for indentation.
+  3. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel

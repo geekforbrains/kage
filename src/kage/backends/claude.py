@@ -24,6 +24,10 @@ COMPACT_DONE_RE = re.compile(r"^\s*⎿\s+Compacted\b")
 LOGIN_ERROR_RE = re.compile(r"\bNot logged in\b|\bPlease run /login\b|\bRun /login\b")
 # AskUserQuestion's confirmation/review step shown after options are picked.
 SUBMIT_CONFIRM_RE = re.compile(r"submit your answers|ready to submit", re.IGNORECASE)
+# Tab bar of the multi-question AskUserQuestion UI, e.g.
+# `←  ☒ Indentation  ☐ Color  ✔ Submit  →`. The checkbox glyphs + a Submit tab
+# distinguish it from ordinary single menus.
+MULTI_Q_TABBAR_RE = re.compile(r"[☐☒].*\bSubmit\b")
 GENERIC_ERROR_RE = re.compile(
     r"\b(?:API Error|Authentication error|Unauthorized|Invalid API key|"
     r"Credit balance|rate limit|permission denied)\b",
@@ -240,6 +244,9 @@ class ClaudeBackend(Backend):
             options=options,
             raw=pane,
         )
+
+    def is_multi_question(self, pane: str) -> bool:
+        return any(MULTI_Q_TABBAR_RE.search(l) for l in pane.splitlines())
 
     def auto_submit_option(self, menu: Menu) -> int | None:
         """Auto-confirm AskUserQuestion's "Ready to submit your answers?" step.

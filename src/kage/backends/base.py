@@ -65,6 +65,14 @@ class Backend:
     def extract_menu(self, pane: str) -> Menu | None:
         raise NotImplementedError
 
+    def is_multi_question(self, pane: str) -> bool:
+        """True if the pane shows a multi-question/tabbed prompt UI.
+
+        Such UIs select-and-advance on a bare keypress, so kage must not append
+        Enter when answering (Enter would submit with defaults). Default: False.
+        """
+        return False
+
     def auto_submit_option(self, menu: Menu) -> int | str | None:
         """For a pure-confirmation menu the caller's choice already implies,
         return the option to auto-select; None to surface the menu instead.

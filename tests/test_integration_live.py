@@ -139,6 +139,35 @@ def test_askuserquestion_choose_auto_submits(session):
     assert "PINEAPPLE" in env["response"]
 
 
+def test_multi_question_back_and_forth(session):
+    """A multi-question AskUserQuestion surfaces each question in turn and
+    honors every answer (no silent defaulting)."""
+    r0 = run("claude", "--session", session, "--json",
+             "Use a single AskUserQuestion call with TWO questions: (1) tabs or "
+             "spaces for indentation, and (2) favorite color among red/blue/green. "
+             "After I answer both, reply with only my two answers comma-separated.")
+    assert r0.returncode == 10, f"{r0.returncode}: {r0.stdout} {r0.stderr}"
+    q1 = json.loads(r0.stdout)["menu"]
+    assert "indent" in q1["question"].lower()
+    pick_a = q1["options"][0]  # whatever the first option actually is
+
+    # answering the first question must surface the SECOND question, not finish
+    r1 = run("session", "choose", session, "1", "--json")
+    assert r1.returncode == 10, f"expected next question, got {r1.returncode}: {r1.stdout}"
+    q2 = json.loads(r1.stdout)["menu"]
+    assert "color" in q2["question"].lower()
+    pick_b = q2["options"][0]
+
+    # answering the last one auto-submits and returns the real response, with
+    # BOTH deliberately-chosen answers honored (options are reordered per run,
+    # so assert on the labels we actually picked, not on fixed indices)
+    r2 = run("session", "choose", session, "1", "--json")
+    assert r2.returncode == 0, f"expected done, got {r2.returncode}: {r2.stdout} {r2.stderr}"
+    resp = json.loads(r2.stdout)["response"].lower()
+    assert resp.strip()
+    assert pick_a.lower() in resp and pick_b.lower() in resp
+
+
 def test_prune_stops_idle_session(session):
     r = run("claude", "--session", session, "reply with only: hi")
     assert r.returncode == 0, r.stderr

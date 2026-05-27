@@ -57,6 +57,13 @@ def _now() -> str:
     return _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
 
 
+def _menu_sig(menu: Menu | None):
+    """Identity of a menu for change-detection (None if absent)."""
+    if menu is None:
+        return None
+    return (menu.question, tuple(menu.options))
+
+
 _DURATION_RE = re.compile(r"^(\d+)([smhd]?)$")
 _DURATION_UNIT = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
 
@@ -402,29 +409,48 @@ class Session:
             if cur_menu is None or (cur_menu.question, tuple(cur_menu.options)) != sig:
                 return
 
-    def _send_choice(self, choice: int | str) -> None:
-        """Answer the on-screen menu by number (select) or text (free input)."""
+    def _send_choice(self, choice: int | str, *, submit: bool = True) -> None:
+        """Answer the on-screen menu by number (select) or text (free input).
+
+        `submit=False` omits the trailing Enter: in the tabbed multi-question
+        UI a number selects the current question and auto-advances, whereas
+        Enter would submit everything (defaulting unanswered tabs).
+        """
         if isinstance(choice, int):
             tmuxlib.send_key(self.tmux_name, str(choice))
-            time.sleep(0.2)
-            tmuxlib.send_key(self.tmux_name, "Enter")
+            if submit:
+                time.sleep(0.2)
+                tmuxlib.send_key(self.tmux_name, "Enter")
         else:
             tmuxlib.paste(self.tmux_name, choice)
-            time.sleep(0.25)
-            tmuxlib.send_key(self.tmux_name, "Enter")
+            if submit:
+                time.sleep(0.25)
+                tmuxlib.send_key(self.tmux_name, "Enter")
 
     def respond_to_menu(self, choice: int | str, *, timeout: float = 120.0) -> SendResult:
         with self._locked(True, 30.0, 0.5):
-            baseline = self.backend.done_marker_count(self.capture())
-            self._send_choice(choice)
-            # Three valid terminal states for a menu response:
+            pane = self.capture()
+            baseline = self.backend.done_marker_count(pane)
+            prev_menu = self.backend.extract_menu(pane) if self.backend.is_menu(pane) else None
+            prev_sig = _menu_sig(prev_menu)
+            # A multi-question tab showing a real question (not the submit step):
+            # answer it with a bare number so the UI advances to the next tab
+            # rather than submitting everything.
+            question_tab = (
+                self.backend.is_multi_question(pane)
+                and prev_menu is not None
+                and self.backend.auto_submit_option(prev_menu) is None
+            )
+            self._send_choice(choice, submit=not question_tab)
+            # Valid outcomes:
             #   1. A new response is generated → `✻ Verb for Ns` marker appears.
-            #   2. A nested menu replaces the current one.
-            #   3. The menu is dismissed without producing a response (e.g. plan
-            #      mode's "Tell Claude what to change") and Claude is idle.
+            #   2. The next question (multi-question) or a nested menu appears.
+            #   3. The submit-confirmation appears → auto-submit and continue.
+            #   4. The menu is dismissed without a response and Claude is idle.
             deadline = time.time() + timeout
             idle_since: float | None = None
             auto_submits = 0
+            submitted = False
             while time.time() < deadline:
                 time.sleep(0.5)
                 cur = self.capture()
@@ -440,6 +466,11 @@ class Session:
                 if self.backend.is_menu(cur):
                     menu = self.backend.extract_menu(cur)
                     if menu:
+                        # Still showing the question we just answered — the tab
+                        # UI hasn't advanced yet; keep waiting.
+                        if question_tab and _menu_sig(menu) == prev_sig:
+                            idle_since = None
+                            continue
                         # A pure-confirmation step (e.g. AskUserQuestion's
                         # "Ready to submit your answers?") is ceremony the
                         # caller's choice already implies — auto-confirm it and
@@ -450,16 +481,23 @@ class Session:
                             auto_submits += 1
                             self._send_choice(auto)
                             self._await_menu_cleared(menu, baseline)
+                            submitted = True
                             idle_since = None
                             continue
+                        # Otherwise surface this menu — for multi-question this
+                        # is the next question, so the caller answers it too.
                         return SendResult(state=State.MENU, menu=menu)
                     idle_since = None
                     continue
                 if not self.backend.is_busy(cur):
-                    # Menu dismissed, no new response, claude back to idle.
-                    # Require the state to hold briefly to avoid catching a
-                    # gap between menu disappearance and spinner appearance.
-                    if idle_since is None:
+                    # Menu dismissed, claude back to idle. After an auto-submit
+                    # a model response is always coming, so keep waiting for the
+                    # done marker rather than returning empty in the gap before
+                    # the spinner appears. Only the no-response case (e.g. plan
+                    # mode's "Tell Claude what to change") resolves to DONE("").
+                    if submitted:
+                        idle_since = None
+                    elif idle_since is None:
                         idle_since = time.time()
                     elif time.time() - idle_since > 1.5:
                         return SendResult(state=State.DONE, text="")
