@@ -125,6 +125,20 @@ def test_no_wait_reports_busy(session):
         slow.wait(timeout=150)
 
 
+def test_askuserquestion_choose_auto_submits(session):
+    """Answering an AskUserQuestion should sail through its 'Ready to submit
+    your answers?' confirmation and return the real response, not a 2nd menu."""
+    r = run("claude", "--session", session, "--json",
+            "Use AskUserQuestion to ask whether I prefer tabs or spaces. After I "
+            "answer, reply with only the word PINEAPPLE and nothing else.")
+    assert r.returncode == 10, f"{r.returncode}: {r.stdout} {r.stderr}"
+    c = run("session", "choose", session, "1", "--json")
+    assert c.returncode == 0, f"expected done, got {c.returncode}: {c.stdout} {c.stderr}"
+    env = json.loads(c.stdout)
+    assert env["status"] == "done"
+    assert "PINEAPPLE" in env["response"]
+
+
 def test_prune_stops_idle_session(session):
     r = run("claude", "--session", session, "reply with only: hi")
     assert r.returncode == 0, r.stderr

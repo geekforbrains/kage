@@ -383,17 +383,40 @@ class Session:
                 resp_baseline=resp_baseline,
             )
 
+    def _await_menu_cleared(self, menu: Menu, baseline: int, *, timeout: float = 10.0) -> None:
+        """Wait until `menu` is no longer on screen after an auto-submit.
+
+        Prevents the caller loop from re-detecting (and re-submitting) the same
+        confirmation menu before Claude transitions to the next state.
+        """
+        sig = (menu.question, tuple(menu.options))
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            time.sleep(0.3)
+            cur = self.capture()
+            if self.backend.done_marker_count(cur) > baseline:
+                return
+            if not self.backend.is_menu(cur):
+                return
+            cur_menu = self.backend.extract_menu(cur)
+            if cur_menu is None or (cur_menu.question, tuple(cur_menu.options)) != sig:
+                return
+
+    def _send_choice(self, choice: int | str) -> None:
+        """Answer the on-screen menu by number (select) or text (free input)."""
+        if isinstance(choice, int):
+            tmuxlib.send_key(self.tmux_name, str(choice))
+            time.sleep(0.2)
+            tmuxlib.send_key(self.tmux_name, "Enter")
+        else:
+            tmuxlib.paste(self.tmux_name, choice)
+            time.sleep(0.25)
+            tmuxlib.send_key(self.tmux_name, "Enter")
+
     def respond_to_menu(self, choice: int | str, *, timeout: float = 120.0) -> SendResult:
         with self._locked(True, 30.0, 0.5):
             baseline = self.backend.done_marker_count(self.capture())
-            if isinstance(choice, int):
-                tmuxlib.send_key(self.tmux_name, str(choice))
-                time.sleep(0.2)
-                tmuxlib.send_key(self.tmux_name, "Enter")
-            else:
-                tmuxlib.paste(self.tmux_name, choice)
-                time.sleep(0.25)
-                tmuxlib.send_key(self.tmux_name, "Enter")
+            self._send_choice(choice)
             # Three valid terminal states for a menu response:
             #   1. A new response is generated → `✻ Verb for Ns` marker appears.
             #   2. A nested menu replaces the current one.
@@ -401,6 +424,7 @@ class Session:
             #      mode's "Tell Claude what to change") and Claude is idle.
             deadline = time.time() + timeout
             idle_since: float | None = None
+            auto_submits = 0
             while time.time() < deadline:
                 time.sleep(0.5)
                 cur = self.capture()
@@ -416,6 +440,18 @@ class Session:
                 if self.backend.is_menu(cur):
                     menu = self.backend.extract_menu(cur)
                     if menu:
+                        # A pure-confirmation step (e.g. AskUserQuestion's
+                        # "Ready to submit your answers?") is ceremony the
+                        # caller's choice already implies — auto-confirm it and
+                        # keep waiting for the real response instead of
+                        # bouncing a second menu back to the caller.
+                        auto = self.backend.auto_submit_option(menu)
+                        if auto is not None and auto_submits < 5:
+                            auto_submits += 1
+                            self._send_choice(auto)
+                            self._await_menu_cleared(menu, baseline)
+                            idle_since = None
+                            continue
                         return SendResult(state=State.MENU, menu=menu)
                     idle_since = None
                     continue

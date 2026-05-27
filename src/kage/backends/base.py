@@ -65,6 +65,15 @@ class Backend:
     def extract_menu(self, pane: str) -> Menu | None:
         raise NotImplementedError
 
+    def auto_submit_option(self, menu: Menu) -> int | str | None:
+        """For a pure-confirmation menu the caller's choice already implies,
+        return the option to auto-select; None to surface the menu instead.
+
+        Default: never auto-submit. Backends override for ceremony menus like
+        AskUserQuestion's "Ready to submit your answers?" review step.
+        """
+        return None
+
     def extract_error(self, pane: str) -> BackendError | None:
         """Return a backend-level diagnostic visible in the current pane."""
         return None

@@ -22,6 +22,8 @@ SPINNER_RE = re.compile(r"^\s*[·✴✦✶✻✼✱✸✵✢✺✷*]\s+\S+…")
 RESPONSE_MARKER = "⏺ "
 COMPACT_DONE_RE = re.compile(r"^\s*⎿\s+Compacted\b")
 LOGIN_ERROR_RE = re.compile(r"\bNot logged in\b|\bPlease run /login\b|\bRun /login\b")
+# AskUserQuestion's confirmation/review step shown after options are picked.
+SUBMIT_CONFIRM_RE = re.compile(r"submit your answers|ready to submit", re.IGNORECASE)
 GENERIC_ERROR_RE = re.compile(
     r"\b(?:API Error|Authentication error|Unauthorized|Invalid API key|"
     r"Credit balance|rate limit|permission denied)\b",
@@ -238,6 +240,20 @@ class ClaudeBackend(Backend):
             options=options,
             raw=pane,
         )
+
+    def auto_submit_option(self, menu: Menu) -> int | None:
+        """Auto-confirm AskUserQuestion's "Ready to submit your answers?" step.
+
+        The caller already chose their answer(s); this review menu is pure
+        ceremony, so pick the "Submit answers" option and let kage proceed to
+        the real response instead of surfacing a second menu.
+        """
+        if not menu or not SUBMIT_CONFIRM_RE.search(menu.question or ""):
+            return None
+        for i, opt in enumerate(menu.options, start=1):
+            if opt.strip().lower().startswith("submit"):
+                return i
+        return None
 
     def extract_error(self, pane: str) -> BackendError | None:
         """Detect Claude diagnostics for the latest submitted prompt."""
