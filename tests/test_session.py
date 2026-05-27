@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import fcntl
+
 import pytest
 
+from kage import state as state_mod
 from kage.backends import Backend, BackendError
-from kage.session import BackendFailure, Session
+from kage.session import BackendFailure, Session, SessionBusy
 
 
 class FakeBackend(Backend):
@@ -59,3 +62,17 @@ def test_wait_raises_empty_response_error():
         sess._wait(baseline=0, timeout=0.01, poll_interval=0)
 
     assert exc.value.error.reason == "empty_response"
+
+
+def test_send_no_wait_respects_existing_lock():
+    sess = Session(backend=FakeBackend(), slug="locked")
+    sess.exists = lambda: True  # type: ignore[method-assign]
+
+    lock = state_mod.lock_path(sess.tmux_name).open("a")
+    try:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        with pytest.raises(SessionBusy):
+            sess.send("hello", wait_if_busy=False)
+    finally:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        lock.close()

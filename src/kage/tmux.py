@@ -1,7 +1,9 @@
 """Low-level tmux wrappers."""
 from __future__ import annotations
 
+import os
 import re
+import shlex
 import subprocess
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07")
@@ -58,8 +60,9 @@ def capture(name: str, *, history: bool = True) -> str:
 
 def paste(name: str, text: str) -> None:
     """Load text into a buffer and paste it into the target pane."""
-    tmux("set-buffer", "-b", "_kage", "--", text)
-    tmux("paste-buffer", "-b", "_kage", "-t", name, "-d")
+    buffer_name = f"_kage_{os.getpid()}"
+    tmux("set-buffer", "-b", buffer_name, "--", text)
+    tmux("paste-buffer", "-b", buffer_name, "-t", name, "-d")
 
 
 def send_key(name: str, key: str) -> None:
@@ -74,5 +77,5 @@ def new_session(name: str, command: list[str], *, width: int = 500, height: int 
     tmux(
         "new-session", "-d", "-s", name,
         "-x", str(width), "-y", str(height),
-        " ".join(command),
+        shlex.join(command),
     )

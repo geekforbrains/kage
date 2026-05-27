@@ -257,14 +257,6 @@ class ClaudeBackend(Backend):
                 )
         return None
 
-    def extract_tool_uses(self, pane: str) -> list[dict]:
-        out = []
-        for l in pane.splitlines():
-            m = TOOL_CALL_RE.match(l)
-            if m:
-                out.append({"name": m.group(1), "input": m.group(2)})
-        return out
-
 
 def _conversation_file(session_id: str) -> Path:
     """Where Claude stores the JSONL log for a session, scoped to current cwd.

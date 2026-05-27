@@ -64,8 +64,9 @@ Or let stdin be the whole message:
 echo "what is the capital of france" | kage claude
 ```
 
-Streaming output, to a terminal, is automatic. When stdout is piped, `kage`
-waits for the full response and prints it once.
+`kage` waits for Claude to finish and prints the final response once. This is
+intentional: the public contract is modeled after `claude -p`, not Claude's
+interactive stream.
 
 ## Calling from scripts
 
@@ -97,15 +98,8 @@ else:
     print("error:", result.stderr)
 ```
 
-For systems that need to see tool calls and partial text as they happen,
-use `--output-format stream-json` and parse one JSON line per event:
-
-```json
-{"type":"start","backend":"claude","session_id":"..."}
-{"type":"tool_use","name":"Bash","input":"echo hello"}
-{"type":"text","delta":"It printed hello."}
-{"type":"done","duration_ms":4247}
-```
+`kage` does not expose tool-use events or partial text deltas. It drives the
+interactive CLI internally and returns the final assistant response.
 
 ## Two ways to identify a session
 
@@ -166,9 +160,8 @@ kage session clear work      # clear context: kill tmux + new UUID, same name
 - `--effort LEVEL` -- effort level to pass through (low/medium/high/xhigh/max)
 - `--bare` -- pass `--bare` to the backend. **Caution:** for Claude Code
   this forces API-key mode and skips your subscription auth. See Caveats.
-- `--output-format {text,json,stream-json}` -- output format (default text)
+- `--output-format {text,json}` -- output format (default text)
 - `--json` -- shorthand for `--output-format=json`
-- `--no-stream` -- never stream text, even to a tty
 - `--no-wait` -- exit with code 11 instead of waiting if the session is
   mid-response from a previous call
 
@@ -226,12 +219,6 @@ oneshot = Session.ephemeral(get_backend("claude"))
 
 with named as s:
     print(s.send("hello").text)
-
-    for chunk in s.stream("write a haiku"):
-        print(chunk, end="", flush=True)
-
-    for event in s.stream_events("count to 3"):
-        print(event)
 ```
 
 ## Backends
@@ -251,8 +238,8 @@ with named as s:
    racy for some TUIs).
 3. `kage` polls the rendered pane and watches for backend-specific markers
    (e.g. Claude's `✻ <verb> for Ns`) to know when the response is complete.
-4. The response is parsed out of the rendered TUI and printed to stdout, or
-   emitted as JSON events for `--output-format stream-json`.
+4. The final response is parsed out of the rendered TUI and printed to
+   stdout.
 5. Interactive menus (plan approval, etc.) are returned as a structured
    envelope with exit code 10, so callers can decide how to respond.
 
@@ -289,15 +276,9 @@ Things to know before you wire kage into anything important.
   with `tmux attach -t kage_<backend>_<slug>` to observe, but if you send
   keys while kage has a request in flight, the next response extraction
   will be wrong. Take turns.
-- **Tool-call visibility in `stream-json` is best-effort.** Tool name and
-  input are scraped from the TUI's `⏺ Name(input)` rendering. Long inputs
-  get truncated by the renderer, and unusual characters in the input may
-  not round-trip exactly. The text response and done event are reliable;
-  tool events are convenience signals.
-- **`stream-json` text deltas follow kage's poll cadence (~400ms), not the
-  model's token stream.** You get periodic snapshots of the rendered
-  response, not token-by-token output. Final text is correct; intermediate
-  chunks may be larger than a single token.
+- **Tool calls are not part of the public contract.** `kage` strips Claude's
+  collapsed tool chrome when it can, but callers only receive the final
+  assistant response.
 - **Some menu choices return DONE with empty text.** When you pick an
   option that dismisses the menu without generating a new model response
   (e.g. plan mode's "Tell Claude what to change"), kage returns exit 0

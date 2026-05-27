@@ -12,7 +12,6 @@ from . import tmux as tmuxlib
 from .backends import get_backend, list_backends
 from .session import (
     BackendFailure,
-    MenuPending,
     Session,
     SessionBusy,
     State,
@@ -58,14 +57,6 @@ def _output_mode(args: argparse.Namespace) -> str:
     return "text"
 
 
-def _should_stream_text(args: argparse.Namespace, mode: str) -> bool:
-    if mode != "text":
-        return False
-    if getattr(args, "no_stream", False):
-        return False
-    return sys.stdout.isatty()
-
-
 def _emit_response(text: str, *, mode: str, backend: str, session: str | None, session_id: str | None) -> None:
     if mode == "json":
         print(json.dumps({
@@ -99,10 +90,6 @@ def _emit_menu(menu, *, mode: str, backend: str, session: str | None, session_id
         f"answer with: kage session choose {session or '<name>'} <number>",
         file=sys.stderr,
     )
-
-
-def _emit_event(event: dict) -> None:
-    print(json.dumps(event), flush=True)
 
 
 def _emit_error(
@@ -156,7 +143,6 @@ def cmd_backend(args: argparse.Namespace, backend_name: str) -> int:
     mode = _output_mode(args)
     sess, cleanup_after = _build_session(args, backend_name)
 
-    started_now = False
     if not sess.exists():
         try:
             sess.start(
@@ -165,10 +151,20 @@ def cmd_backend(args: argparse.Namespace, backend_name: str) -> int:
                 model=args.model,
                 effort=args.effort,
             )
-            started_now = True
         except Exception as e:
-            print(f"error: failed to start {backend_name}: {e}", file=sys.stderr)
-            return EXIT_ERROR
+            # Another kage process may have created the same tmux session
+            # between our exists() check and new-session. If it exists now,
+            # proceed; Session.send() will serialize access with the lock.
+            if not sess.exists():
+                _emit_error(
+                    mode=mode,
+                    backend=backend_name,
+                    session=args.session,
+                    session_id=sess.session_id,
+                    reason="start_failed",
+                    message=f"failed to start {backend_name}: {e}",
+                )
+                return EXIT_ERROR
     else:
         for flag in ("system_prompt", "model", "effort"):
             if getattr(args, flag):
@@ -178,10 +174,6 @@ def cmd_backend(args: argparse.Namespace, backend_name: str) -> int:
                 )
 
     try:
-        if mode == "stream-json":
-            return _run_stream_json(sess, message, args)
-        if _should_stream_text(args, mode):
-            return _run_stream_text(sess, message, args, backend_name)
         return _run_send(sess, message, args, backend_name, mode)
     finally:
         if cleanup_after:
@@ -196,7 +188,14 @@ def _run_send(sess: Session, message: str, args, backend_name: str, mode: str) -
             wait_if_busy=not args.no_wait,
         )
     except SessionBusy as e:
-        print(f"error: {e}", file=sys.stderr)
+        _emit_error(
+            mode=mode,
+            backend=backend_name,
+            session=args.session,
+            session_id=sess.session_id,
+            reason="busy",
+            message=str(e),
+        )
         return EXIT_BUSY
     except BackendFailure as e:
         _emit_error(
@@ -209,7 +208,14 @@ def _run_send(sess: Session, message: str, args, backend_name: str, mode: str) -
         )
         return EXIT_ERROR
     except TimeoutError as e:
-        print(f"error: {e}", file=sys.stderr)
+        _emit_error(
+            mode=mode,
+            backend=backend_name,
+            session=args.session,
+            session_id=sess.session_id,
+            reason="timeout",
+            message=str(e),
+        )
         return EXIT_TIMEOUT
     if result.state == State.MENU:
         _emit_menu(result.menu, mode=mode, backend=backend_name,
@@ -218,61 +224,6 @@ def _run_send(sess: Session, message: str, args, backend_name: str, mode: str) -
     _emit_response(result.text, mode=mode, backend=backend_name,
                    session=args.session, session_id=sess.session_id)
     return EXIT_OK
-
-
-def _run_stream_text(sess: Session, message: str, args, backend_name: str) -> int:
-    try:
-        for chunk in sess.stream(
-            message,
-            timeout=args.timeout,
-            wait_if_busy=not args.no_wait,
-        ):
-            sys.stdout.write(chunk)
-            sys.stdout.flush()
-        print()
-        return EXIT_OK
-    except SessionBusy as e:
-        print(f"error: {e}", file=sys.stderr)
-        return EXIT_BUSY
-    except BackendFailure as e:
-        print(f"\nerror: {e.error.message}", file=sys.stderr)
-        return EXIT_ERROR
-    except MenuPending as e:
-        print()
-        _emit_menu(e.menu, mode="text", backend=backend_name,
-                   session=args.session, session_id=sess.session_id)
-        return EXIT_MENU
-    except TimeoutError as e:
-        print(f"\nerror: {e}", file=sys.stderr)
-        return EXIT_TIMEOUT
-
-
-def _run_stream_json(sess: Session, message: str, args) -> int:
-    try:
-        last_type = None
-        for ev in sess.stream_events(
-            message,
-            timeout=args.timeout,
-            wait_if_busy=not args.no_wait,
-        ):
-            _emit_event(ev)
-            last_type = ev.get("type")
-        if last_type == "menu":
-            return EXIT_MENU
-        return EXIT_OK
-    except SessionBusy as e:
-        _emit_event({"type": "error", "message": str(e), "reason": "busy"})
-        return EXIT_BUSY
-    except BackendFailure as e:
-        _emit_event({
-            "type": "error",
-            "message": e.error.message,
-            "reason": e.error.reason,
-        })
-        return EXIT_ERROR
-    except TimeoutError as e:
-        _emit_event({"type": "error", "message": str(e), "reason": "timeout"})
-        return EXIT_TIMEOUT
 
 
 # --- session subcommands ---
@@ -574,12 +525,10 @@ def _add_backend_subparser(sub, backend_name: str) -> None:
                    help="model alias to pass through (e.g. opus, sonnet)")
     p.add_argument("--effort", default=None,
                    help="effort level to pass through (low, medium, high, xhigh, max)")
-    p.add_argument("--output-format", choices=["text", "json", "stream-json"],
+    p.add_argument("--output-format", choices=["text", "json"],
                    default=None, help="output format (default: text)")
     p.add_argument("--json", action="store_true",
                    help="shorthand for --output-format=json")
-    p.add_argument("--no-stream", action="store_true",
-                   help="never stream text, even to a tty")
     p.add_argument("--no-wait", action="store_true",
                    help="exit with code 11 instead of waiting if session is busy")
     p.set_defaults(func=lambda a, bn=backend_name: cmd_backend(a, bn))

@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import datetime as _dt
+import fcntl
 import re
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Iterator
 
 from . import state as state_mod
 from . import tmux as tmuxlib
@@ -21,12 +22,6 @@ class SendResult:
     state: State
     text: str = ""
     menu: Menu | None = None
-
-
-class MenuPending(Exception):
-    def __init__(self, menu: Menu):
-        super().__init__(menu.question)
-        self.menu = menu
 
 
 class SessionBusy(Exception):
@@ -262,172 +257,79 @@ class Session:
     ) -> SendResult:
         if not self.exists():
             raise RuntimeError(f"no session: {self.tmux_name}")
-        # A menu pending from a previous turn or from startup must be answered
-        # before any new message is sent; pasting into a menu would type the
-        # message into the option selector.
-        pane = self.capture()
-        if self.backend.is_menu(pane):
-            menu = self.backend.extract_menu(pane)
-            if menu:
-                return SendResult(state=State.MENU, menu=menu)
-        self._await_idle(wait_if_busy, wait_busy_timeout, poll_interval)
-        baseline = self._submit(message)
-        return self._wait(baseline=baseline, timeout=timeout, poll_interval=poll_interval)
-
-    def stream(
-        self,
-        message: str,
-        *,
-        timeout: float = 120.0,
-        poll_interval: float = 0.4,
-        wait_if_busy: bool = True,
-        wait_busy_timeout: float = 30.0,
-    ) -> Iterator[str]:
-        """Yield new text tail chunks as the response renders."""
-        if not self.exists():
-            raise RuntimeError(f"no session: {self.tmux_name}")
-        self._await_idle(wait_if_busy, wait_busy_timeout, poll_interval)
-        baseline = self._submit(message)
-        last_full = ""
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            time.sleep(poll_interval)
-            cur = self.capture()
-            self._raise_backend_error(cur)
-            partial = self.backend.extract_response(cur)
-            if partial and partial != last_full:
-                if partial.startswith(last_full):
-                    yield partial[len(last_full):]
-                else:
-                    yield "\r" + partial
-                last_full = partial
-            if self.backend.done_marker_count(cur) > baseline:
-                if not last_full and not self.backend.extract_response(cur):
-                    self._raise_empty_response(cur)
-                return
-            if self.backend.is_menu(cur):
-                menu = self.backend.extract_menu(cur)
-                if menu:
-                    raise MenuPending(menu)
-        raise TimeoutError(f"no done marker after {timeout}s")
-
-    def stream_events(
-        self,
-        message: str,
-        *,
-        timeout: float = 120.0,
-        poll_interval: float = 0.4,
-        wait_if_busy: bool = True,
-        wait_busy_timeout: float = 30.0,
-    ) -> Iterator[dict]:
-        """Yield structured events as the response renders.
-
-        Event types:
-          - {"type": "start"}
-          - {"type": "text", "delta": "..."}
-          - {"type": "tool_use", "name": "Bash", "input": "..."}
-          - {"type": "menu", "menu": {...}}
-          - {"type": "done", "duration_ms": N}
-        """
-        if not self.exists():
-            raise RuntimeError(f"no session: {self.tmux_name}")
-        self._await_idle(wait_if_busy, wait_busy_timeout, poll_interval)
-        started_at = time.time()
-        baseline = self._submit(message)
-        yield {"type": "start", "backend": self.backend.name, "session_id": self.session_id}
-
-        last_full = ""
-        seen_tools: set[tuple[str, str]] = set()
-        deadline = started_at + timeout
-        while time.time() < deadline:
-            time.sleep(poll_interval)
-            cur = self.capture()
-            self._raise_backend_error(cur)
-            partial = self.backend.extract_response(cur)
-            if partial and partial != last_full:
-                if partial.startswith(last_full):
-                    yield {"type": "text", "delta": partial[len(last_full):]}
-                else:
-                    yield {"type": "text", "delta": partial, "replace": True}
-                last_full = partial
-
-            for tool in self.backend.extract_tool_uses(cur):
-                key = (tool["name"], tool["input"])
-                if key not in seen_tools:
-                    seen_tools.add(key)
-                    yield {"type": "tool_use", **tool}
-
-            if self.backend.done_marker_count(cur) > baseline:
-                if not last_full and not self.backend.extract_response(cur):
-                    self._raise_empty_response(cur)
-                yield {
-                    "type": "done",
-                    "duration_ms": int((time.time() - started_at) * 1000),
-                }
-                return
-            if self.backend.is_menu(cur):
-                menu = self.backend.extract_menu(cur)
-                if menu:
-                    yield {"type": "menu", "menu": {
-                        "question": menu.question, "options": menu.options,
-                    }}
-                    return
-        raise TimeoutError(f"no done marker after {timeout}s")
-
-    def respond_to_menu(self, choice: int | str, *, timeout: float = 120.0) -> SendResult:
-        baseline = self.backend.done_marker_count(self.capture())
-        if isinstance(choice, int):
-            tmuxlib.send_key(self.tmux_name, str(choice))
-            time.sleep(0.2)
-            tmuxlib.send_key(self.tmux_name, "Enter")
-        else:
-            tmuxlib.paste(self.tmux_name, choice)
-            time.sleep(0.25)
-            tmuxlib.send_key(self.tmux_name, "Enter")
-        # Three valid terminal states for a menu response:
-        #   1. A new response is generated → `✻ Verb for Ns` marker appears.
-        #   2. A nested menu replaces the current one.
-        #   3. The menu is dismissed without producing a response (e.g. plan
-        #      mode's "Tell Claude what to change") and Claude is idle.
-        deadline = time.time() + timeout
-        idle_since: float | None = None
-        while time.time() < deadline:
-            time.sleep(0.5)
-            cur = self.capture()
-            self._raise_backend_error(cur)
-            if self.backend.done_marker_count(cur) > baseline:
-                if self.record:
-                    self.record.last_used_at = _now()
-                    state_mod.upsert(self.record)
-                return SendResult(
-                    state=State.DONE,
-                    text=self.backend.extract_response(cur),
-                )
-            if self.backend.is_menu(cur):
-                menu = self.backend.extract_menu(cur)
+        with self._locked(wait_if_busy, wait_busy_timeout, poll_interval):
+            # A menu pending from a previous turn or from startup must be
+            # answered before any new message is sent; pasting into a menu
+            # would type the message into the option selector.
+            pane = self.capture()
+            if self.backend.is_menu(pane):
+                menu = self.backend.extract_menu(pane)
                 if menu:
                     return SendResult(state=State.MENU, menu=menu)
-                idle_since = None
-                continue
-            if not self.backend.is_busy(cur):
-                # Menu dismissed, no new response, claude back to idle. Require
-                # the state to hold for ~1.5s to avoid catching a brief gap
-                # between menu disappearance and spinner appearance.
-                if idle_since is None:
-                    idle_since = time.time()
-                elif time.time() - idle_since > 1.5:
-                    return SendResult(state=State.DONE, text="")
+            self._await_idle(wait_if_busy, wait_busy_timeout, poll_interval)
+            baseline = self._submit(message)
+            return self._wait(
+                baseline=baseline,
+                timeout=timeout,
+                poll_interval=poll_interval,
+            )
+
+    def respond_to_menu(self, choice: int | str, *, timeout: float = 120.0) -> SendResult:
+        with self._locked(True, 30.0, 0.5):
+            baseline = self.backend.done_marker_count(self.capture())
+            if isinstance(choice, int):
+                tmuxlib.send_key(self.tmux_name, str(choice))
+                time.sleep(0.2)
+                tmuxlib.send_key(self.tmux_name, "Enter")
             else:
-                idle_since = None
-        raise TimeoutError(f"no terminal state after {timeout}s")
+                tmuxlib.paste(self.tmux_name, choice)
+                time.sleep(0.25)
+                tmuxlib.send_key(self.tmux_name, "Enter")
+            # Three valid terminal states for a menu response:
+            #   1. A new response is generated → `✻ Verb for Ns` marker appears.
+            #   2. A nested menu replaces the current one.
+            #   3. The menu is dismissed without producing a response (e.g. plan
+            #      mode's "Tell Claude what to change") and Claude is idle.
+            deadline = time.time() + timeout
+            idle_since: float | None = None
+            while time.time() < deadline:
+                time.sleep(0.5)
+                cur = self.capture()
+                self._raise_backend_error(cur)
+                if self.backend.done_marker_count(cur) > baseline:
+                    if self.record:
+                        self.record.last_used_at = _now()
+                        state_mod.upsert(self.record)
+                    return SendResult(
+                        state=State.DONE,
+                        text=self.backend.extract_response(cur),
+                    )
+                if self.backend.is_menu(cur):
+                    menu = self.backend.extract_menu(cur)
+                    if menu:
+                        return SendResult(state=State.MENU, menu=menu)
+                    idle_since = None
+                    continue
+                if not self.backend.is_busy(cur):
+                    # Menu dismissed, no new response, claude back to idle.
+                    # Require the state to hold briefly to avoid catching a
+                    # gap between menu disappearance and spinner appearance.
+                    if idle_since is None:
+                        idle_since = time.time()
+                    elif time.time() - idle_since > 1.5:
+                        return SendResult(state=State.DONE, text="")
+                else:
+                    idle_since = None
+            raise TimeoutError(f"no terminal state after {timeout}s")
 
     def slash(self, command: str, *, timeout: float = 120.0) -> SendResult:
         """Send a slash command (e.g. /compact) and wait for completion."""
         if not self.exists():
             raise RuntimeError(f"no session: {self.tmux_name}")
-        self._await_idle(True, 30.0, 0.5)
-        self._submit(command)
-        return self._wait_slash(command, timeout=timeout, poll_interval=0.5)
+        with self._locked(True, 30.0, 0.5):
+            self._await_idle(True, 30.0, 0.5)
+            self._submit(command)
+            return self._wait_slash(command, timeout=timeout, poll_interval=0.5)
 
     def _wait_slash(
         self,
@@ -457,6 +359,30 @@ class Session:
         raise TimeoutError(f"slash command {command!r} did not complete in {timeout}s")
 
     # ---- internals ----
+
+    @contextmanager
+    def _locked(self, wait: bool, timeout: float, poll: float):
+        path = state_mod.lock_path(self.tmux_name)
+        fh = path.open("a")
+        acquired = False
+        deadline = time.time() + timeout
+        try:
+            while True:
+                try:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    acquired = True
+                    break
+                except BlockingIOError:
+                    if not wait or time.time() >= deadline:
+                        raise SessionBusy(
+                            f"session {self.tmux_name} is locked by another kage call"
+                        )
+                    time.sleep(poll)
+            yield
+        finally:
+            if acquired:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            fh.close()
 
     def _await_idle(self, wait: bool, timeout: float, poll: float) -> None:
         if not self.backend.is_busy(self.capture()):

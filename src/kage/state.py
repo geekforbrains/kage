@@ -24,6 +24,12 @@ def _state_file() -> Path:
     return _state_dir() / "sessions.json"
 
 
+def lock_path(name: str) -> Path:
+    d = _state_dir() / "locks"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f"{name}.lock"
+
+
 @dataclass
 class SessionRecord:
     name: str
@@ -69,7 +75,10 @@ def _save(store: _Store) -> None:
     d = _state_dir()
     d.mkdir(parents=True, exist_ok=True)
     payload = {"sessions": {n: r.to_dict() for n, r in store.sessions.items()}}
-    _state_file().write_text(json.dumps(payload, indent=2))
+    p = _state_file()
+    tmp = p.with_name(f".{p.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(payload, indent=2))
+    tmp.replace(p)
 
 
 def get(name: str) -> SessionRecord | None:

@@ -67,11 +67,3 @@ class Backend:
     def extract_error(self, pane: str) -> BackendError | None:
         """Return a backend-level diagnostic visible in the current pane."""
         return None
-
-    def extract_tool_uses(self, pane: str) -> list[dict]:
-        """Return tool-use events visible in the current pane.
-
-        Each dict has at least: {"name": str, "input": str}. Order matches
-        rendering order; callers may need to dedupe.
-        """
-        return []

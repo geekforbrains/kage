@@ -191,21 +191,6 @@ def test_no_menu_when_idle(backend):
 
 
 # ---------------------------------------------------------------------------
-# tool-use extraction — names with spaces must survive (Research Agent etc).
-
-def test_tool_uses_simple(backend):
-    uses = backend.extract_tool_uses(fx("tool_calls_response"))
-    assert {u["name"] for u in uses} == {"Bash"}
-    assert uses[0]["input"] == 'echo "hi"'
-
-
-def test_tool_uses_subagent_with_space(backend):
-    uses = backend.extract_tool_uses(fx("subagent_response"))
-    names = [u["name"] for u in uses]
-    assert "Research Agent" in names, f"got {names}"
-
-
-# ---------------------------------------------------------------------------
 # regex sanity — direct unit tests on the patterns. Faster to debug than the
 # fixture tests when a regex change accidentally narrows coverage.
 

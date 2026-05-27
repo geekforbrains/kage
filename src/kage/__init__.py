@@ -1,6 +1,5 @@
 """kage - scriptable bridge for interactive AI CLIs."""
 from .session import (
-    MenuPending,
     SendResult,
     Session,
     SessionBusy,
@@ -12,7 +11,6 @@ __version__ = "0.2.0"
 __all__ = [
     "Session",
     "SendResult",
-    "MenuPending",
     "SessionBusy",
     "State",
     "get_backend",
