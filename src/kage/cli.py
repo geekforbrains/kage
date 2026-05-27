@@ -129,7 +129,8 @@ def _emit_response(text: str, *, mode: str, backend: str, session: str | None, s
         print(text)
 
 
-def _emit_menu(menu, *, mode: str, backend: str, session: str | None, session_id: str | None) -> None:
+def _emit_menu(menu, *, mode: str, backend: str, session: str | None,
+               session_id: str | None, choose_ref: str | None = None) -> None:
     if mode == "json":
         print(json.dumps({
             "status": "menu",
@@ -146,7 +147,7 @@ def _emit_menu(menu, *, mode: str, backend: str, session: str | None, session_id
     for i, opt in enumerate(menu.options if menu else [], start=1):
         print(f"  {i}. {opt}", file=sys.stderr)
     print(
-        f"answer with: kage session choose {session or '<name>'} <number>",
+        f"answer with: kage session choose {choose_ref or session or '<name>'} <number>",
         file=sys.stderr,
     )
 
@@ -242,10 +243,14 @@ def cmd_backend(args: argparse.Namespace, backend_name: str) -> int:
             )
             progress = False
 
+    rc: int | None = None
     try:
-        return _run_send(sess, message, args, backend_name, mode, progress=progress)
+        rc = _run_send(sess, message, args, backend_name, mode, progress=progress)
+        return rc
     finally:
-        if cleanup_after:
+        # An ephemeral session that ended on a pending menu must survive so the
+        # caller can answer it; tearing it down here would strand the menu.
+        if cleanup_after and rc != EXIT_MENU:
             sess.stop()
 
 
@@ -301,8 +306,11 @@ def _run_send(sess: Session, message: str, args, backend_name: str, mode: str,
         )
         return EXIT_TIMEOUT
     if result.state == State.MENU:
+        # For an anonymous (ephemeral) session there's no --session name, so
+        # point the caller at the addressable tmux slug instead of "<name>".
         _emit_menu(result.menu, mode=mode, backend=backend_name,
-                   session=args.session, session_id=sess.session_id)
+                   session=args.session, session_id=sess.session_id,
+                   choose_ref=args.session or sess.slug)
         return EXIT_MENU
     _emit_response(result.text, mode=mode, backend=backend_name,
                    session=args.session, session_id=sess.session_id)
