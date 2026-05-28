@@ -90,11 +90,10 @@ class ClaudeBackend(Backend):
         session_id: str | None = None,
         display_name: str | None = None,
         system_prompt: str | None = None,
-        bare: bool = False,
         model: str | None = None,
         effort: str | None = None,
         settings: str | None = None,
-        autonomous: bool = False,
+        autonomous: bool = True,
     ) -> list[str]:
         # --dangerously-skip-permissions is required, not optional: without it
         # every tool call raises a permission menu that would block a scripted,
@@ -119,8 +118,6 @@ class ClaudeBackend(Backend):
             prompts.append(AUTONOMOUS_SYSTEM_PROMPT)
         if prompts:
             cmd += ["--append-system-prompt", "\n\n".join(prompts)]
-        if bare:
-            cmd.append("--bare")
         if model:
             cmd += ["--model", model]
         if effort:

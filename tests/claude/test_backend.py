@@ -192,8 +192,8 @@ def test_no_menu_when_idle(backend):
     assert backend.extract_menu(fx("simple_response")) is None
 
 
-def test_start_command_autonomous_removes_tui_interaction_tools(backend):
-    cmd = backend.start_command(system_prompt="custom rule", autonomous=True)
+def test_start_command_removes_tui_interaction_tools_by_default(backend):
+    cmd = backend.start_command(system_prompt="custom rule")
 
     assert "--disallowed-tools=" + ",".join(INTERACTIVE_TOOLS) in cmd
     prompt = cmd[cmd.index("--append-system-prompt") + 1]

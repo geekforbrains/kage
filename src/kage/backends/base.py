@@ -36,11 +36,10 @@ class Backend:
         session_id: str | None = None,
         display_name: str | None = None,
         system_prompt: str | None = None,
-        bare: bool = False,
         model: str | None = None,
         effort: str | None = None,
         settings: str | None = None,
-        autonomous: bool = False,
+        autonomous: bool = True,
     ) -> list[str]:
         raise NotImplementedError
 

@@ -168,11 +168,9 @@ class Session:
         name: str,
         backend: Backend,
         *,
-        bare: bool = False,
         model: str | None = None,
         effort: str | None = None,
         system_prompt: str | None = None,
-        autonomous: bool = False,
     ) -> "Session":
         rec = state_mod.get(name)
         if rec is None:
@@ -180,11 +178,9 @@ class Session:
                 name=name,
                 backend=backend.name,
                 session_id=state_mod.new_session_id(),
-                bare=bare,
                 model=model,
                 effort=effort,
                 system_prompt=system_prompt,
-                autonomous=autonomous,
                 created_at=_now(),
                 last_used_at=_now(),
             )
@@ -260,10 +256,8 @@ class Session:
         self,
         *,
         system_prompt: str | None = None,
-        bare: bool | None = None,
         model: str | None = None,
         effort: str | None = None,
-        autonomous: bool | None = None,
         progress: bool = False,
         ready_timeout: float = 20.0,
     ) -> None:
@@ -272,17 +266,12 @@ class Session:
 
         # Persisted record beats per-call defaults; per-call beats nothing.
         rec = self.record
-        cfg_bare = bare if bare is not None else (rec.bare if rec else False)
         cfg_model = model or (rec.model if rec else None)
         cfg_effort = effort or (rec.effort if rec else None)
         cfg_prompt = system_prompt or (rec.system_prompt if rec else None)
-        cfg_autonomous = (
-            autonomous if autonomous is not None else (rec.autonomous if rec else False)
-        )
 
         settings = None
-        if progress and not cfg_bare:
-            # --bare skips hooks entirely, so progress only applies otherwise.
+        if progress:
             settings_file = state_mod.hooks_settings_path(self.tmux_name)
             hooks_mod.write_settings_file(settings_file, self.events_file)
             settings = str(settings_file)
@@ -291,11 +280,9 @@ class Session:
             session_id=self.session_id,
             display_name=self._display_name(),
             system_prompt=cfg_prompt,
-            bare=cfg_bare,
             model=cfg_model,
             effort=cfg_effort,
             settings=settings,
-            autonomous=cfg_autonomous,
         )
         tmuxlib.new_session(self.tmux_name, cmd, width=self.width, height=self.height)
         deadline = time.time() + ready_timeout

@@ -77,15 +77,13 @@ TUI; it does not invoke Claude Code's `-p`/`--print` mode.
 ## Calling from scripts
 
 `kage` is built to be called from automation. The contract is stable:
-`--json` or `--output-format` for structured output, exit codes for status,
-stdin for piped input.
+`--json` for structured output, exit codes for status, stdin for piped input.
 
 ```python
 import subprocess, json
 
 result = subprocess.run(
-    ["kage", "claude", "--json",
-     "--autonomous"],
+    ["kage", "claude", "--json"],
     input="implement the function in todo.py",
     capture_output=True, text=True, timeout=300,
 )
@@ -94,9 +92,9 @@ if result.returncode == 0:
     data = json.loads(result.stdout)
     print(data["response"])
 elif result.returncode == 10:
-    print("blocked on a menu, see stderr")
+    print("claude paused on an interactive TUI prompt")
 elif result.returncode == 11:
-    print("session was busy and --no-wait was set")
+    print("session was busy")
 elif result.returncode == 124:
     print("timed out")
 else:
@@ -139,8 +137,6 @@ kage session list            # known and running sessions
 kage session kill work       # stop tmux pane, keep the state record
 kage session rm   work       # stop tmux pane and forget the state record
 kage session show work       # raw pane dump (debug)
-kage session menu work       # show pending menu, if any
-kage session choose work 2   # answer a pending menu by option number
 kage session compact work    # /compact: summarize the conversation
 kage session clear work      # clear context: kill tmux + new UUID, same name
 ```
@@ -154,24 +150,19 @@ kage session clear work      # clear context: kill tmux + new UUID, same name
 
 ## Options
 
-`kage claude` (and other backend subcommands) accepts:
+`kage claude` accepts:
 
 - `--session NAME`, `-s NAME` -- reuse a kage-managed persistent session
 - `--session-id UUID` -- reuse a specific underlying conversation UUID
 - `--timeout SECONDS`, `-t SECONDS` -- max wait for a response (default 120)
-- `--system-prompt TEXT` -- appended to the backend's system prompt, on
-  session start only
-- `--autonomous` -- disable Claude Code tools that can pause for TUI input
-  (`AskUserQuestion`, `EnterPlanMode`, `ExitPlanMode`) and append instructions
-  to make assumptions instead of asking; session start only
 - `--model NAME` -- model alias to pass through (e.g. opus, sonnet)
 - `--effort LEVEL` -- effort level to pass through (low/medium/high/xhigh/max)
-- `--bare` -- pass `--bare` to the backend. **Caution:** for Claude Code
-  this forces API-key mode and skips your subscription auth. See Caveats.
-- `--output-format {text,json}` -- output format (default text)
-- `--json` -- shorthand for `--output-format=json`
-- `--no-wait` -- exit with code 11 instead of waiting if the session is
-  mid-response from a previous call
+- `--json` -- emit a JSON envelope instead of plain response text
+
+Autonomous behavior is always on. kage removes Claude Code interaction tools
+that would pause for TUI input (`AskUserQuestion`, `EnterPlanMode`,
+`ExitPlanMode`) and appends instructions to make reasonable assumptions
+instead of asking.
 
 ## Exit codes
 
@@ -180,8 +171,8 @@ kage session clear work      # clear context: kill tmux + new UUID, same name
 | 0    | Success |
 | 1    | Error (session crashed, backend missing, not logged in, empty response, etc.) |
 | 2    | Usage error |
-| 10   | Menu pending, awaiting input |
-| 11   | Session busy and `--no-wait` was set |
+| 10   | Claude paused on an interactive TUI prompt |
+| 11   | Session busy |
 | 124  | Timeout (no response within `--timeout` seconds) |
 
 ## JSON output
@@ -191,20 +182,19 @@ $ kage claude --json "what is 2+2"
 {"status":"done","backend":"claude","session":null,"session_id":"...","response":"4"}
 ```
 
-When the TUI is waiting on a menu, you get:
+If Claude still reaches an interactive TUI prompt, JSON mode returns an error
+envelope and exits `10`:
 
 ```json
-{"status":"menu","backend":"claude","session":"work",
+{"status":"error","backend":"claude","session":"work",
  "session_id":"...",
- "menu":{"question":"Do you want to create hello.txt?","options":["Yes","Yes, allow all edits during this session (shift+tab)","No"]}}
+ "reason":"interaction_required",
+ "message":"Claude Code paused on an interactive TUI prompt..."}
 ```
 
-The exit code is `10`. Respond with `kage session choose <name> <number>`.
-The same envelope is returned for plan-approval menus, tool-permission
-prompts (when `--dangerously-skip-permissions` is off — kage passes that
-flag by default), Claude's `AskUserQuestion` clarifications, and the
-first-run trust-folder dialog. `question` is whatever Claude wrote;
-match on `options` if you need to dispatch on intent.
+This should be rare in normal use because kage starts Claude with permission
+bypass enabled and interaction tools denied. When it happens, inspect or reset
+the session with `kage session show <name>` or `kage session rm <name>`.
 
 When the backend reports a terminal error, JSON mode returns an error
 envelope and exits `1`:
@@ -229,13 +219,11 @@ with named as s:
     print(s.send("hello").text)
 ```
 
-## Backends
+## Supported CLI
 
-| Backend  | Status |
-|----------|--------|
-| claude   | Working (Claude Code) |
-| codex    | Planned (OpenAI Codex CLI) |
-| gemini   | Planned (Google Gemini CLI) |
+`kage` currently targets Claude Code. The backend abstraction is intentionally
+small, but the product is focused on subscription-backed Claude Code
+automation.
 
 ## How it works
 
@@ -248,22 +236,18 @@ with named as s:
    (e.g. Claude's `✻ <verb> for Ns`) to know when the response is complete.
 4. The final response is parsed out of the rendered TUI and printed to
    stdout.
-5. Interactive menus (plan approval, etc.) are returned as a structured
-   envelope with exit code 10, so callers can decide how to respond.
+5. Interactive menus are treated as automation failures with exit code 10.
+   kage does not ask the caller to pick from TUI choices.
 
 ## Caveats
 
 Things to know before you wire kage into anything important.
 
-- **`--bare` forces API-key mode for Claude Code.** It skips keychain reads,
-  so your subscription auth is ignored. Without `ANTHROPIC_API_KEY` set,
-  the session will fail; with it set, you'll be charged via the API. Don't
-  pass `--bare` unless you have an API key and want to use it.
 - **Auto-memory persists across `session clear`.** `clear` rotates the
   conversation UUID, but Claude's auto-memory files (facts saved across
   sessions) are independent. A "cleared" session will still recall things
-  Claude wrote to memory in a previous turn. For full isolation you need
-  API-key mode (`--bare`) or to manually clear memory.
+  Claude wrote to memory in a previous turn. For full isolation you need to
+  manually clear memory.
 - **kage parses the rendered TUI.** If the AI CLI changes its prompt
   marker, done marker, tool-call format, or spinner style, kage's
   extraction may break until it's updated. Pin a known-good version of the
@@ -287,11 +271,6 @@ Things to know before you wire kage into anything important.
 - **Tool calls are not part of the public contract.** `kage` strips Claude's
   collapsed tool chrome when it can, but callers only receive the final
   assistant response.
-- **Some menu choices return DONE with empty text.** When you pick an
-  option that dismisses the menu without generating a new model response
-  (e.g. plan mode's "Tell Claude what to change"), kage returns exit 0
-  with `response: ""`. That's a successful action, not a failure — the
-  next `kage claude --session=...` call resumes normally.
 - **`kage session show` needs the tmux pane to be running.** If you have
   only a state record (e.g. just after a reboot), run a regular
   `kage claude --session=NAME "..."` first to revive the pane.

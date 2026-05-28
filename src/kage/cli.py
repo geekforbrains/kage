@@ -28,7 +28,8 @@ from . import state as state_mod
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_USAGE = 2
-EXIT_MENU = 10
+EXIT_INTERACTION_REQUIRED = 10
+EXIT_MENU = EXIT_INTERACTION_REQUIRED
 EXIT_BUSY = 11
 EXIT_TIMEOUT = 124
 
@@ -107,10 +108,7 @@ def _resolve_message(args: argparse.Namespace) -> str:
 
 
 def _output_mode(args: argparse.Namespace) -> str:
-    """Resolve --output-format and legacy --json into a single mode."""
-    fmt = getattr(args, "output_format", None)
-    if fmt:
-        return fmt
+    """Resolve output mode."""
     if getattr(args, "json", False):
         return "json"
     return "text"
@@ -129,27 +127,24 @@ def _emit_response(text: str, *, mode: str, backend: str, session: str | None, s
         print(text)
 
 
-def _emit_menu(menu, *, mode: str, backend: str, session: str | None,
-               session_id: str | None, choose_ref: str | None = None) -> None:
+def _emit_interaction_required(menu, *, mode: str, backend: str, session: str | None,
+                               session_id: str | None) -> None:
+    question = menu.question if menu else "interactive input requested"
+    message = (
+        "Claude Code paused on an interactive TUI prompt. kage runs in "
+        f"autonomous mode; inspect or reset the session instead. Prompt: {question}"
+    )
     if mode == "json":
         print(json.dumps({
-            "status": "menu",
+            "status": "error",
             "backend": backend,
             "session": session,
             "session_id": session_id,
-            "menu": {
-                "question": menu.question if menu else None,
-                "options": menu.options if menu else [],
-            },
+            "reason": "interaction_required",
+            "message": message,
         }))
         return
-    print(f"MENU: {menu.question if menu else '(unparseable)'}", file=sys.stderr)
-    for i, opt in enumerate(menu.options if menu else [], start=1):
-        print(f"  {i}. {opt}", file=sys.stderr)
-    print(
-        f"answer with: kage session choose {choose_ref or session or '<name>'} <number>",
-        file=sys.stderr,
-    )
+    print(f"error: {message}", file=sys.stderr)
 
 
 def _emit_error(
@@ -188,11 +183,9 @@ def _build_session(args: argparse.Namespace, backend_name: str) -> tuple[Session
     if args.session:
         return Session.named(
             args.session, backend,
-            bare=args.bare,
             model=args.model,
             effort=args.effort,
-            system_prompt=args.system_prompt,
-            autonomous=args.autonomous,
+            system_prompt=getattr(args, "system_prompt", None),
         ), False
     return Session.ephemeral(backend), True
 
@@ -204,16 +197,12 @@ def cmd_backend(args: argparse.Namespace, backend_name: str) -> int:
     mode = _output_mode(args)
     sess, cleanup_after = _build_session(args, backend_name)
 
-    progress = getattr(args, "progress", False)
     if not sess.exists():
         try:
             sess.start(
-                system_prompt=args.system_prompt,
-                bare=args.bare,
+                system_prompt=getattr(args, "system_prompt", None),
                 model=args.model,
                 effort=args.effort,
-                autonomous=args.autonomous,
-                progress=progress,
             )
         except Exception as e:
             # Another kage process may have created the same tmux session
@@ -230,52 +219,26 @@ def cmd_backend(args: argparse.Namespace, backend_name: str) -> int:
                 )
                 return EXIT_ERROR
     else:
-        for flag in ("system_prompt", "model", "effort", "autonomous"):
-            if getattr(args, flag):
+        for flag in ("system_prompt", "model", "effort"):
+            if getattr(args, flag, None):
                 print(
                     f"warning: --{flag.replace('_', '-')} ignored (session already running)",
                     file=sys.stderr,
                 )
-        if progress and not sess.has_progress_hooks():
-            print(
-                "warning: --progress needs a session started with it; "
-                "hooks are registered at startup. Run "
-                f"`kage session rm {args.session or '<name>'}` and retry for live events.",
-                file=sys.stderr,
-            )
-            progress = False
-
     rc: int | None = None
     try:
-        rc = _run_send(sess, message, args, backend_name, mode, progress=progress)
+        rc = _run_send(sess, message, args, backend_name, mode)
         return rc
     finally:
-        # An ephemeral session that ended on a pending menu must survive so the
-        # caller can answer it; tearing it down here would strand the menu.
-        if cleanup_after and rc != EXIT_MENU:
+        if cleanup_after:
             sess.stop()
 
-
-def _progress_printer():
-    """Return an on_event callback that prints live activity to stderr."""
-    def _on_event(ev) -> None:
-        if ev.event == "PreToolUse":
-            if ev.tool == "AskUserQuestion":
-                line = f"  ? {ev.summary}" if ev.summary else "  ? (asking)"
-            else:
-                line = f"  → {ev.tool}" + (f"  {ev.summary}" if ev.summary else "")
-            print(line, file=sys.stderr, flush=True)
-    return _on_event
-
-
-def _run_send(sess: Session, message: str, args, backend_name: str, mode: str,
-              *, progress: bool = False) -> int:
+def _run_send(sess: Session, message: str, args, backend_name: str, mode: str) -> int:
     try:
         result = sess.send(
             message,
             timeout=args.timeout,
-            wait_if_busy=not args.no_wait,
-            on_event=_progress_printer() if progress else None,
+            wait_if_busy=not getattr(args, "no_wait", False),
         )
     except SessionBusy as e:
         _emit_error(
@@ -308,12 +271,9 @@ def _run_send(sess: Session, message: str, args, backend_name: str, mode: str,
         )
         return EXIT_TIMEOUT
     if result.state == State.MENU:
-        # For an anonymous (ephemeral) session there's no --session name, so
-        # point the caller at the addressable tmux slug instead of "<name>".
-        _emit_menu(result.menu, mode=mode, backend=backend_name,
-                   session=args.session, session_id=sess.session_id,
-                   choose_ref=args.session or sess.slug)
-        return EXIT_MENU
+        _emit_interaction_required(result.menu, mode=mode, backend=backend_name,
+                                   session=args.session, session_id=sess.session_id)
+        return EXIT_INTERACTION_REQUIRED
     _emit_response(result.text, mode=mode, backend=backend_name,
                    session=args.session, session_id=sess.session_id)
     return EXIT_OK
@@ -455,9 +415,10 @@ def cmd_session_menu(args: argparse.Namespace) -> int:
             print("(no menu pending)")
         return EXIT_OK
     menu = sess.backend.extract_menu(pane)
-    _emit_menu(menu, mode="json" if args.json else "text",
-               backend=backend_name, session=name, session_id=sess.session_id)
-    return EXIT_MENU
+    _emit_interaction_required(menu, mode="json" if args.json else "text",
+                               backend=backend_name, session=name,
+                               session_id=sess.session_id)
+    return EXIT_INTERACTION_REQUIRED
 
 
 def cmd_session_choose(args: argparse.Namespace) -> int:
@@ -486,9 +447,9 @@ def cmd_session_choose(args: argparse.Namespace) -> int:
         return EXIT_TIMEOUT
     mode = "json" if args.json else "text"
     if result.state == State.MENU:
-        _emit_menu(result.menu, mode=mode, backend=backend_name,
-                   session=name, session_id=sess.session_id)
-        return EXIT_MENU
+        _emit_interaction_required(result.menu, mode=mode, backend=backend_name,
+                                   session=name, session_id=sess.session_id)
+        return EXIT_INTERACTION_REQUIRED
     _emit_response(result.text, mode=mode, backend=backend_name,
                    session=name, session_id=sess.session_id)
     return EXIT_OK
@@ -651,7 +612,7 @@ def _add_backend_subparser(sub, backend_name: str) -> None:
         backend_name,
         help=f"send a message to {backend_name}",
         description=(
-            f"Send a message to {backend_name} and print the response. "
+            f"Send a message to {backend_name} through its TUI and print the response. "
             "Without --session or --session-id, an ephemeral one-shot is used. "
             "Pass --session NAME for a kage-managed persistent session, or "
             "--session-id UUID to drive a specific underlying conversation."
@@ -666,26 +627,12 @@ def _add_backend_subparser(sub, backend_name: str) -> None:
     p.add_argument("--timeout", "-t", type=float, default=120.0,
                    help="seconds to wait for a response (default 120). Raise it "
                         "for long agentic turns; on expiry kage exits 124.")
-    p.add_argument("--system-prompt", default=None,
-                   help="appended to backend system prompt (session-start only)")
-    p.add_argument("--autonomous", action="store_true",
-                   help="disable TUI interaction tools and make assumptions instead of asking "
-                        "(session-start only)")
-    p.add_argument("--bare", action="store_true",
-                   help="pass --bare to the backend: minimal mode, no auto-memory, no CLAUDE.md")
     p.add_argument("--model", default=None,
                    help="model alias to pass through (e.g. opus, sonnet)")
     p.add_argument("--effort", default=None,
                    help="effort level to pass through (low, medium, high, xhigh, max)")
-    p.add_argument("--output-format", choices=["text", "json"],
-                   default=None, help="output format (default: text)")
     p.add_argument("--json", action="store_true",
-                   help="shorthand for --output-format=json")
-    p.add_argument("--no-wait", action="store_true",
-                   help="exit with code 11 instead of waiting if session is busy")
-    p.add_argument("--progress", action="store_true",
-                   help="stream live tool-use activity to stderr (hooks; "
-                        "session must be started with this flag)")
+                   help="emit a JSON envelope instead of plain response text")
     p.set_defaults(func=lambda a, bn=backend_name: cmd_backend(a, bn))
 
 
@@ -719,17 +666,6 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sess_sub.add_parser("show", help="dump raw pane (debug)")
     p.add_argument("name")
     p.set_defaults(func=cmd_session_show)
-
-    p = sess_sub.add_parser("menu", help="show pending menu, if any")
-    p.add_argument("name")
-    p.add_argument("--json", action="store_true")
-    p.set_defaults(func=cmd_session_menu)
-
-    p = sess_sub.add_parser("choose", help="answer a pending menu by number or text")
-    p.add_argument("name")
-    p.add_argument("choice")
-    p.add_argument("--json", action="store_true")
-    p.set_defaults(func=cmd_session_choose)
 
     p = sess_sub.add_parser("compact", help="run /compact on a running named session")
     p.add_argument("name")

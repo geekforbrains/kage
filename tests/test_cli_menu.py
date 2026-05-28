@@ -1,4 +1,4 @@
-"""Ephemeral-session menu handling: don't tear down an unanswered menu."""
+"""Menu states are surfaced as non-interactive failures."""
 import argparse
 
 from kage import cli
@@ -30,9 +30,7 @@ class FakeSession:
 def _args(**kw):
     base = dict(
         message="hi", session=None, session_id=None,
-        output_format=None, json=False, timeout=120.0, no_wait=False,
-        progress=False, bare=False, system_prompt=None, model=None, effort=None,
-        autonomous=False,
+        json=False, timeout=120.0, model=None, effort=None,
     )
     base.update(kw)
     return argparse.Namespace(**base)
@@ -42,13 +40,13 @@ def _patch_build(monkeypatch, sess, cleanup_after):
     monkeypatch.setattr(cli, "_build_session", lambda args, bn: (sess, cleanup_after))
 
 
-def test_ephemeral_menu_is_not_torn_down(monkeypatch):
+def test_ephemeral_menu_is_torn_down(monkeypatch):
     sess = FakeSession(SendResult(state=State.MENU,
                                   menu=Menu(question="Which one?", options=["a", "b"])))
     _patch_build(monkeypatch, sess, cleanup_after=True)
     rc = cli.cmd_backend(_args(), "claude")
-    assert rc == cli.EXIT_MENU
-    assert sess.stopped is False  # the menu must remain answerable
+    assert rc == cli.EXIT_INTERACTION_REQUIRED
+    assert sess.stopped is True
 
 
 def test_ephemeral_done_is_cleaned_up(monkeypatch):
@@ -59,11 +57,12 @@ def test_ephemeral_done_is_cleaned_up(monkeypatch):
     assert sess.stopped is True  # ordinary one-shot still tidies up
 
 
-def test_menu_guidance_uses_slug_for_anonymous(monkeypatch, capsys):
+def test_menu_error_does_not_expose_choices(monkeypatch, capsys):
     sess = FakeSession(SendResult(state=State.MENU,
                                   menu=Menu(question="Which one?", options=["a", "b"])))
     _patch_build(monkeypatch, sess, cleanup_after=True)
-    cli.cmd_backend(_args(), "claude")  # text mode -> guidance on stderr
+    cli.cmd_backend(_args(), "claude")
     err = capsys.readouterr().err
-    assert "kage session choose oneshot_fake1234" in err
-    assert "<name>" not in err
+    assert "interactive TUI prompt" in err
+    assert "Which one?" in err
+    assert "1. a" not in err
