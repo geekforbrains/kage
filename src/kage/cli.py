@@ -7,6 +7,7 @@ import fcntl
 import json
 import os
 import select
+import signal
 import shutil
 import subprocess
 import sys
@@ -33,6 +34,7 @@ EXIT_MENU = EXIT_INTERACTION_REQUIRED
 EXIT_BUSY = 11
 EXIT_TIMEOUT = 124
 _TMUX_ENV_PREFIXES = ("ENSO_ORIGIN_",)
+DEFAULT_SESSION_BACKEND = "claude"
 
 
 # --- input/output helpers ---
@@ -222,12 +224,41 @@ def _build_session(args: argparse.Namespace, backend_name: str) -> tuple[Session
     return Session.ephemeral(backend), True
 
 
+def _install_signal_cleanup(sess: Session):
+    """Stop the tmux session if the supervising kage process is interrupted."""
+    watched = (signal.SIGINT, signal.SIGTERM)
+    previous = {}
+
+    def handler(signum, frame):
+        try:
+            sess.stop()
+        finally:
+            raise SystemExit(128 + signum)
+
+    for sig in watched:
+        try:
+            previous[sig] = signal.getsignal(sig)
+            signal.signal(sig, handler)
+        except (OSError, ValueError):
+            continue
+
+    def restore() -> None:
+        for sig, prior in previous.items():
+            try:
+                signal.signal(sig, prior)
+            except (OSError, ValueError):
+                pass
+
+    return restore
+
+
 # --- backend dispatch (the primary command form) ---
 
 def cmd_backend(args: argparse.Namespace, backend_name: str) -> int:
     message = _resolve_message(args)
     mode = _output_mode(args)
     sess, cleanup_after = _build_session(args, backend_name)
+    restart = bool(getattr(args, "restart", False))
     start_kwargs = {
         "system_prompt": getattr(args, "system_prompt", None),
         "model": args.model,
@@ -237,35 +268,31 @@ def cmd_backend(args: argparse.Namespace, backend_name: str) -> int:
     if mode == "stream":
         start_kwargs["progress"] = True
 
-    if not sess.exists():
-        try:
-            sess.start(**start_kwargs)
-        except Exception as e:
-            # Another kage process may have created the same tmux session
-            # between our exists() check and new-session. If it exists now,
-            # proceed; Session.send() will serialize access with the lock.
-            if not sess.exists():
-                _emit_error(
-                    mode=mode,
-                    backend=backend_name,
-                    session=args.session,
-                    session_id=sess.session_id,
-                    reason="start_failed",
-                    message=f"failed to start {backend_name}: {e}",
-                )
-                return EXIT_ERROR
-    else:
-        restarted = False
-        if mode == "stream" and not sess.has_progress_hooks():
-            pane = sess.capture()
-            if sess.backend.is_busy(pane) or sess.backend.is_menu(pane):
-                print(
-                    "warning: --stream requested but the running session was "
-                    "started without progress hooks; restart the idle session "
-                    "to enable progress events",
-                    file=sys.stderr,
-                )
-            else:
+    restore_signal_cleanup = None
+    if getattr(args, "stop_on_signal", False):
+        restore_signal_cleanup = _install_signal_cleanup(sess)
+
+    try:
+        if not sess.exists():
+            try:
+                sess.start(**start_kwargs)
+            except Exception as e:
+                # Another kage process may have created the same tmux session
+                # between our exists() check and new-session. If it exists now,
+                # proceed; Session.send() will serialize access with the lock.
+                if not sess.exists():
+                    _emit_error(
+                        mode=mode,
+                        backend=backend_name,
+                        session=args.session,
+                        session_id=sess.session_id,
+                        reason="start_failed",
+                        message=f"failed to start {backend_name}: {e}",
+                    )
+                    return EXIT_ERROR
+        else:
+            restarted = False
+            if restart:
                 sess.stop()
                 try:
                     sess.start(**start_kwargs)
@@ -277,20 +304,44 @@ def cmd_backend(args: argparse.Namespace, backend_name: str) -> int:
                         session=args.session,
                         session_id=sess.session_id,
                         reason="start_failed",
-                        message=f"failed to restart {backend_name} with progress hooks: {e}",
+                        message=f"failed to restart {backend_name}: {e}",
                     )
                     return EXIT_ERROR
-        for flag in ("system_prompt", "model", "effort"):
-            if not restarted and getattr(args, flag, None):
-                print(
-                    f"warning: --{flag.replace('_', '-')} ignored (session already running)",
-                    file=sys.stderr,
-                )
-    rc: int | None = None
-    try:
+            elif mode == "stream" and not sess.has_progress_hooks():
+                pane = sess.capture()
+                if sess.backend.is_busy(pane) or sess.backend.is_menu(pane):
+                    print(
+                        "warning: --stream requested but the running session was "
+                        "started without progress hooks; restart the idle session "
+                        "to enable progress events",
+                        file=sys.stderr,
+                    )
+                else:
+                    sess.stop()
+                    try:
+                        sess.start(**start_kwargs)
+                        restarted = True
+                    except Exception as e:
+                        _emit_error(
+                            mode=mode,
+                            backend=backend_name,
+                            session=args.session,
+                            session_id=sess.session_id,
+                            reason="start_failed",
+                            message=f"failed to restart {backend_name} with progress hooks: {e}",
+                        )
+                        return EXIT_ERROR
+            for flag in ("system_prompt", "model", "effort"):
+                if not restarted and getattr(args, flag, None):
+                    print(
+                        f"warning: --{flag.replace('_', '-')} ignored (session already running)",
+                        file=sys.stderr,
+                    )
         rc = _run_send(sess, message, args, backend_name, mode)
         return rc
     finally:
+        if restore_signal_cleanup is not None:
+            restore_signal_cleanup()
         if cleanup_after:
             sess.stop()
 
@@ -430,8 +481,29 @@ def _load_session(name: str) -> tuple[str, str, Session] | None:
         return None
 
 
+def _session_for_target(args: argparse.Namespace) -> tuple[str, str, Session] | None:
+    """Resolve either a named session target or a caller-owned session id."""
+    name = getattr(args, "name", None)
+    session_id = getattr(args, "session_id", None)
+    if name and session_id:
+        print("error: session name and --session-id are mutually exclusive", file=sys.stderr)
+        return None
+    if session_id:
+        backend_name = getattr(args, "backend", None) or DEFAULT_SESSION_BACKEND
+        try:
+            backend = get_backend(backend_name)
+        except ValueError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return None
+        return backend_name, f"id:{session_id[:8]}", Session.by_id(session_id, backend)
+    if name:
+        return _load_session(name)
+    print("error: pass a session name or --session-id", file=sys.stderr)
+    return None
+
+
 def cmd_session_kill(args: argparse.Namespace) -> int:
-    resolved = _load_session(args.name)
+    resolved = _session_for_target(args)
     if resolved is None:
         return EXIT_ERROR
     backend_name, name, sess = resolved
@@ -460,7 +532,7 @@ def cmd_session_rm(args: argparse.Namespace) -> int:
 
 
 def cmd_session_show(args: argparse.Namespace) -> int:
-    resolved = _load_session(args.name)
+    resolved = _session_for_target(args)
     if resolved is None:
         return EXIT_ERROR
     _backend_name, name, sess = resolved
@@ -609,17 +681,23 @@ def cmd_session_prune(args: argparse.Namespace) -> int:
 
 
 def cmd_session_clear(args: argparse.Namespace) -> int:
-    rec = state_mod.get(args.name)
-    if not rec:
-        print(f"error: no named session {args.name!r}", file=sys.stderr)
+    resolved = _session_for_target(args)
+    if resolved is None:
         return EXIT_ERROR
-    sess = Session.named(args.name, get_backend(rec.backend))
+    _backend_name, name, sess = resolved
+    old_session_id = sess.session_id
     sess.reset()
     if args.json:
-        print(json.dumps({"status": "cleared", "session": args.name,
-                          "session_id": sess.session_id}))
+        payload = {
+            "status": "cleared",
+            "session": getattr(args, "name", None),
+            "session_id": sess.session_id,
+        }
+        if getattr(args, "session_id", None):
+            payload["cleared_session_id"] = old_session_id
+        print(json.dumps(payload))
     else:
-        print(f"cleared: {args.name} (new session_id={sess.session_id})")
+        print(f"cleared: {name} (new session_id={sess.session_id})")
     return EXIT_OK
 
 
@@ -707,7 +785,20 @@ def _add_backend_subparser(sub, backend_name: str) -> None:
                    help="emit a JSON envelope instead of plain response text")
     p.add_argument("--stream", action="store_true",
                    help="emit newline-delimited JSON progress events and final response")
+    p.add_argument("--restart", action="store_true",
+                   help="restart an existing tmux pane before sending")
+    p.add_argument("--stop-on-signal", action="store_true",
+                   help="stop the tmux pane if kage receives SIGINT or SIGTERM")
     p.set_defaults(func=lambda a, bn=backend_name: cmd_backend(a, bn))
+
+
+def _add_session_target_args(p: argparse.ArgumentParser, *, help_text: str) -> None:
+    p.add_argument("name", nargs="?", help=help_text)
+    p.add_argument("--session-id", default=None,
+                   help="target a caller-managed backend session UUID")
+    p.add_argument("--backend", default=DEFAULT_SESSION_BACKEND,
+                   choices=list_backends(),
+                   help=f"backend for --session-id (default {DEFAULT_SESSION_BACKEND})")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -730,7 +821,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_session_list)
 
     p = sess_sub.add_parser("kill", help="stop the tmux pane (keep the record)")
-    p.add_argument("name")
+    _add_session_target_args(p, help_text="session name or running slug")
     p.set_defaults(func=cmd_session_kill)
 
     p = sess_sub.add_parser("rm", help="stop and forget a named session")
@@ -738,7 +829,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_session_rm)
 
     p = sess_sub.add_parser("show", help="dump raw pane (debug)")
-    p.add_argument("name")
+    _add_session_target_args(p, help_text="session name or running slug")
     p.set_defaults(func=cmd_session_show)
 
     p = sess_sub.add_parser("compact", help="run /compact on a running named session")
@@ -751,7 +842,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "clear",
         help="clear context: kill tmux and rotate to a fresh underlying UUID",
     )
-    p.add_argument("name")
+    _add_session_target_args(p, help_text="session name or running slug")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_session_clear)
 

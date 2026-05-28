@@ -1,6 +1,9 @@
 """Menu states are surfaced as non-interactive failures."""
 import argparse
 import json
+import signal
+
+import pytest
 
 from kage import hooks
 from kage import cli
@@ -30,6 +33,7 @@ class FakeSession:
         self.session_id = "fake-sid-1234"
         self.slug = "oneshot_fake1234"
         self.stopped = False
+        self.stop_calls = 0
         self.started = False
         self.start_progress = None
         self.start_kwargs = None
@@ -60,6 +64,7 @@ class FakeSession:
 
     def stop(self):
         self.stopped = True
+        self.stop_calls += 1
         return True
 
 
@@ -67,6 +72,7 @@ def _args(**kw):
     base = dict(
         message="hi", session=None, session_id=None,
         json=False, stream=False, timeout=120.0, model=None, effort=None,
+        restart=False, stop_on_signal=False,
     )
     base.update(kw)
     return argparse.Namespace(**base)
@@ -160,3 +166,57 @@ def test_stream_mode_restarts_idle_existing_session_without_hooks(monkeypatch):
     assert sess.stopped is True
     assert sess.started is True
     assert sess.start_progress is True
+
+
+def test_restart_recreates_existing_session_with_requested_options(monkeypatch, capsys):
+    sess = FakeSession(SendResult(state=State.DONE, text="done"), has_hooks=True)
+    _patch_build(monkeypatch, sess, cleanup_after=False)
+
+    rc = cli.cmd_backend(_args(restart=True, model="sonnet", effort="high"), "claude")
+
+    assert rc == cli.EXIT_OK
+    assert sess.stop_calls == 1
+    assert sess.started is True
+    assert sess.start_kwargs["model"] == "sonnet"
+    assert sess.start_kwargs["effort"] == "high"
+    assert "ignored" not in capsys.readouterr().err
+
+
+def test_backend_parser_accepts_restart_and_stop_on_signal():
+    parser = cli._build_parser()
+
+    args = parser.parse_args([
+        "claude", "--restart", "--stop-on-signal", "hello",
+    ])
+
+    assert args.restart is True
+    assert args.stop_on_signal is True
+
+
+def test_signal_cleanup_stops_session_and_restores_handlers(monkeypatch):
+    sess = FakeSession(SendResult(state=State.DONE, text="done"))
+    installed = {}
+    restored = []
+
+    def fake_getsignal(sig):
+        return f"old-{sig}"
+
+    def fake_signal(sig, handler):
+        installed[sig] = handler
+        restored.append((sig, handler))
+
+    monkeypatch.setattr(cli.signal, "getsignal", fake_getsignal)
+    monkeypatch.setattr(cli.signal, "signal", fake_signal)
+
+    restore = cli._install_signal_cleanup(sess)
+
+    with pytest.raises(SystemExit) as exc:
+        installed[signal.SIGTERM](signal.SIGTERM, None)
+
+    assert exc.value.code == 128 + signal.SIGTERM
+    assert sess.stop_calls == 1
+
+    restore()
+
+    assert (signal.SIGINT, f"old-{signal.SIGINT}") in restored
+    assert (signal.SIGTERM, f"old-{signal.SIGTERM}") in restored
