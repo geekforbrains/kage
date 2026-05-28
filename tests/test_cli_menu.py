@@ -32,6 +32,7 @@ def _args(**kw):
         message="hi", session=None, session_id=None,
         output_format=None, json=False, timeout=120.0, no_wait=False,
         progress=False, bare=False, system_prompt=None, model=None, effort=None,
+        autonomous=False,
     )
     base.update(kw)
     return argparse.Namespace(**base)

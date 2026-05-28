@@ -40,6 +40,7 @@ class Backend:
         model: str | None = None,
         effort: str | None = None,
         settings: str | None = None,
+        autonomous: bool = False,
     ) -> list[str]:
         raise NotImplementedError
 

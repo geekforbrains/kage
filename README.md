@@ -79,8 +79,7 @@ import subprocess, json
 
 result = subprocess.run(
     ["kage", "claude", "--json",
-     "--system-prompt",
-     "no plan mode. no clarifying questions. return only the answer."],
+     "--autonomous"],
     input="implement the function in todo.py",
     capture_output=True, text=True, timeout=300,
 )
@@ -156,6 +155,9 @@ kage session clear work      # clear context: kill tmux + new UUID, same name
 - `--timeout SECONDS`, `-t SECONDS` -- max wait for a response (default 120)
 - `--system-prompt TEXT` -- appended to the backend's system prompt, on
   session start only
+- `--autonomous` -- disable Claude Code tools that can pause for TUI input
+  (`AskUserQuestion`, `EnterPlanMode`, `ExitPlanMode`) and append instructions
+  to make assumptions instead of asking; session start only
 - `--model NAME` -- model alias to pass through (e.g. opus, sonnet)
 - `--effort LEVEL` -- effort level to pass through (low/medium/high/xhigh/max)
 - `--bare` -- pass `--bare` to the backend. **Caution:** for Claude Code

@@ -53,6 +53,7 @@ class SessionRecord:
     model: str | None = None
     effort: str | None = None
     system_prompt: str | None = None
+    autonomous: bool = False
     created_at: str = ""
     last_used_at: str = ""
 

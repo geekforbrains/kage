@@ -192,6 +192,7 @@ def _build_session(args: argparse.Namespace, backend_name: str) -> tuple[Session
             model=args.model,
             effort=args.effort,
             system_prompt=args.system_prompt,
+            autonomous=args.autonomous,
         ), False
     return Session.ephemeral(backend), True
 
@@ -211,6 +212,7 @@ def cmd_backend(args: argparse.Namespace, backend_name: str) -> int:
                 bare=args.bare,
                 model=args.model,
                 effort=args.effort,
+                autonomous=args.autonomous,
                 progress=progress,
             )
         except Exception as e:
@@ -228,7 +230,7 @@ def cmd_backend(args: argparse.Namespace, backend_name: str) -> int:
                 )
                 return EXIT_ERROR
     else:
-        for flag in ("system_prompt", "model", "effort"):
+        for flag in ("system_prompt", "model", "effort", "autonomous"):
             if getattr(args, flag):
                 print(
                     f"warning: --{flag.replace('_', '-')} ignored (session already running)",
@@ -666,6 +668,9 @@ def _add_backend_subparser(sub, backend_name: str) -> None:
                         "for long agentic turns; on expiry kage exits 124.")
     p.add_argument("--system-prompt", default=None,
                    help="appended to backend system prompt (session-start only)")
+    p.add_argument("--autonomous", action="store_true",
+                   help="disable TUI interaction tools and make assumptions instead of asking "
+                        "(session-start only)")
     p.add_argument("--bare", action="store_true",
                    help="pass --bare to the backend: minimal mode, no auto-memory, no CLAUDE.md")
     p.add_argument("--model", default=None,

@@ -172,6 +172,7 @@ class Session:
         model: str | None = None,
         effort: str | None = None,
         system_prompt: str | None = None,
+        autonomous: bool = False,
     ) -> "Session":
         rec = state_mod.get(name)
         if rec is None:
@@ -183,6 +184,7 @@ class Session:
                 model=model,
                 effort=effort,
                 system_prompt=system_prompt,
+                autonomous=autonomous,
                 created_at=_now(),
                 last_used_at=_now(),
             )
@@ -261,6 +263,7 @@ class Session:
         bare: bool | None = None,
         model: str | None = None,
         effort: str | None = None,
+        autonomous: bool | None = None,
         progress: bool = False,
         ready_timeout: float = 20.0,
     ) -> None:
@@ -273,6 +276,9 @@ class Session:
         cfg_model = model or (rec.model if rec else None)
         cfg_effort = effort or (rec.effort if rec else None)
         cfg_prompt = system_prompt or (rec.system_prompt if rec else None)
+        cfg_autonomous = (
+            autonomous if autonomous is not None else (rec.autonomous if rec else False)
+        )
 
         settings = None
         if progress and not cfg_bare:
@@ -289,6 +295,7 @@ class Session:
             model=cfg_model,
             effort=cfg_effort,
             settings=settings,
+            autonomous=cfg_autonomous,
         )
         tmuxlib.new_session(self.tmux_name, cmd, width=self.width, height=self.height)
         deadline = time.time() + ready_timeout

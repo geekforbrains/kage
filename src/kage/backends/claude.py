@@ -40,6 +40,15 @@ MENU_HEADERS = (
     "Would you like to proceed?",
     "Trust the files in this folder?",
 )
+# Tools that put Claude Code back into a human-facing TUI flow instead of
+# returning a final answer to a scripted caller.
+INTERACTIVE_TOOLS = ("AskUserQuestion", "EnterPlanMode", "ExitPlanMode")
+AUTONOMOUS_SYSTEM_PROMPT = (
+    "Autonomous non-interactive mode is active. Do not ask the user questions, "
+    "do not enter plan mode, and do not use tools that require user input or "
+    "approval. If information is missing, make a reasonable assumption and "
+    "continue to a final answer."
+)
 # Lines below the option block we treat as boundary markers (not part of the menu).
 _MENU_HINT_PREFIXES = (
     "Esc ", "Enter ", "Tab ", "shift+tab", "ctrl-", "ctrl+", "↑", "←",
@@ -85,12 +94,15 @@ class ClaudeBackend(Backend):
         model: str | None = None,
         effort: str | None = None,
         settings: str | None = None,
+        autonomous: bool = False,
     ) -> list[str]:
         # --dangerously-skip-permissions is required, not optional: without it
         # every tool call raises a permission menu that would block a scripted,
         # non-interactive caller. kage is built to drive trusted automation, so
         # it always bypasses permission prompts.
         cmd = ["claude", "--dangerously-skip-permissions"]
+        if autonomous:
+            cmd.append("--disallowed-tools=" + ",".join(INTERACTIVE_TOOLS))
         if settings:
             cmd += ["--settings", settings]
         if session_id:
@@ -100,8 +112,13 @@ class ClaudeBackend(Backend):
                 cmd += ["--session-id", session_id]
         if display_name:
             cmd += ["--name", display_name]
+        prompts = []
         if system_prompt:
-            cmd += ["--append-system-prompt", system_prompt]
+            prompts.append(system_prompt)
+        if autonomous:
+            prompts.append(AUTONOMOUS_SYSTEM_PROMPT)
+        if prompts:
+            cmd += ["--append-system-prompt", "\n\n".join(prompts)]
         if bare:
             cmd.append("--bare")
         if model:
