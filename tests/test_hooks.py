@@ -139,6 +139,16 @@ def _assistant_text(t):
     return {"type": "assistant", "message": {"content": [{"type": "text", "text": t}]}}
 
 
+def _assistant_text_with_stop(t, stop_reason):
+    return {
+        "type": "assistant",
+        "message": {
+            "content": [{"type": "text", "text": t}],
+            "stop_reason": stop_reason,
+        },
+    }
+
+
 def _assistant_tool(name):
     return {"type": "assistant", "message": {"content": [
         {"type": "tool_use", "name": name, "input": {}}]}}
@@ -175,3 +185,27 @@ def test_count_baseline_distinguishes_new_from_stale(tmp_path, monkeypatch):
         fh.write(json.dumps(_assistant_text("fresh answer")) + "\n")
     assert b.transcript_text_count(sid) > baseline
     assert b.final_response(sid) == "fresh answer"
+
+
+def test_tool_use_preface_does_not_count_as_final_response(tmp_path, monkeypatch):
+    sid = _write_transcript(tmp_path, monkeypatch, [
+        _assistant_text_with_stop("old answer", "end_turn"),
+        _assistant_text_with_stop("Let me check the git history of that line.", "tool_use"),
+        _assistant_tool("Bash"),
+    ])
+    b = ClaudeBackend()
+    assert b.transcript_text_count(sid) == 1
+    assert b.final_response(sid) == "old answer"
+
+
+def test_terminal_text_after_tool_use_preface_is_final_response(tmp_path, monkeypatch):
+    sid = _write_transcript(tmp_path, monkeypatch, [
+        _assistant_text_with_stop("old answer", "end_turn"),
+        _assistant_text_with_stop("Let me check the git history of that line.", "tool_use"),
+        _assistant_tool("Bash"),
+        {"type": "user", "message": {"content": [{"type": "tool_result"}]}},
+        _assistant_text_with_stop("final answer after inspecting git", "end_turn"),
+    ])
+    b = ClaudeBackend()
+    assert b.transcript_text_count(sid) == 2
+    assert b.final_response(sid) == "final answer after inspecting git"

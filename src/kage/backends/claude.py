@@ -125,13 +125,13 @@ class ClaudeBackend(Backend):
         return cmd
 
     def ready_marker(self, pane: str) -> bool:
-        return any(PROMPT_RE.match(l) for l in pane.splitlines())
+        return any(PROMPT_RE.match(line) for line in pane.splitlines())
 
     def is_done(self, pane: str) -> bool:
-        return any(DONE_RE.match(l) for l in pane.splitlines())
+        return any(DONE_RE.match(line) for line in pane.splitlines())
 
     def done_marker_count(self, pane: str) -> int:
-        return sum(1 for l in pane.splitlines() if DONE_RE.match(l))
+        return sum(1 for line in pane.splitlines() if DONE_RE.match(line))
 
     def is_busy(self, pane: str) -> bool:
         """Active-work signal: a spinner is rendered and no menu is pending.
@@ -143,17 +143,17 @@ class ClaudeBackend(Backend):
         """
         if self.is_menu(pane):
             return False
-        return any(SPINNER_RE.search(l) for l in pane.splitlines())
+        return any(SPINNER_RE.search(line) for line in pane.splitlines())
 
     def is_menu(self, pane: str) -> bool:
         """A menu is on screen if any option line carries the `❯` selector."""
-        return any(MENU_SELECTOR_RE.match(l) for l in pane.splitlines())
+        return any(MENU_SELECTOR_RE.match(line) for line in pane.splitlines())
 
     def extract_response(self, pane: str) -> str:
         lines = pane.splitlines()
         last_done = -1
-        for i, l in enumerate(lines):
-            if DONE_RE.match(l):
+        for i, line in enumerate(lines):
+            if DONE_RE.match(line):
                 last_done = i
         if last_done < 0:
             return ""
@@ -173,14 +173,14 @@ class ClaudeBackend(Backend):
             return ""
         body = lines[response_start : last_done]
         cleaned = []
-        for l in body:
-            if _is_tool_chrome(l):
+        for line in body:
+            if _is_tool_chrome(line):
                 continue
-            if l.startswith(RESPONSE_MARKER):
-                l = l[len(RESPONSE_MARKER):]
-            elif l.startswith("  "):
-                l = l[2:]
-            cleaned.append(l)
+            if line.startswith(RESPONSE_MARKER):
+                line = line[len(RESPONSE_MARKER):]
+            elif line.startswith("  "):
+                line = line[2:]
+            cleaned.append(line)
         while cleaned and not cleaned[0].strip():
             cleaned.pop(0)
         while cleaned and not cleaned[-1].strip():
@@ -196,8 +196,8 @@ class ClaudeBackend(Backend):
         """
         lines = pane.splitlines()
         selector_idx = -1
-        for i, l in enumerate(lines):
-            if MENU_SELECTOR_RE.match(l):
+        for i, line in enumerate(lines):
+            if MENU_SELECTOR_RE.match(line):
                 selector_idx = i
                 break
         if selector_idx < 0:
@@ -260,7 +260,7 @@ class ClaudeBackend(Backend):
         )
 
     def is_multi_question(self, pane: str) -> bool:
-        return any(MULTI_Q_TABBAR_RE.search(l) for l in pane.splitlines())
+        return any(MULTI_Q_TABBAR_RE.search(line) for line in pane.splitlines())
 
     def auto_submit_option(self, menu: Menu) -> int | None:
         """Auto-confirm AskUserQuestion's "Ready to submit your answers?" step.
@@ -304,7 +304,12 @@ class ClaudeBackend(Backend):
 
 
     def _assistant_texts(self, session_id: str) -> list[str]:
-        """Text of each text-bearing assistant message, in transcript order."""
+        """Text of each terminal text-bearing assistant message.
+
+        Claude may emit a text block with ``stop_reason=tool_use`` before
+        running tools. That is progress narration, not a final answer, and
+        must not advance the response baseline used by stream callers.
+        """
         path = _conversation_file(session_id)
         try:
             lines = path.read_text().splitlines()
@@ -321,7 +326,10 @@ class ClaudeBackend(Backend):
                 continue
             if rec.get("type") != "assistant":
                 continue
-            content = (rec.get("message") or {}).get("content")
+            message = rec.get("message") or {}
+            if message.get("stop_reason") == "tool_use":
+                continue
+            content = message.get("content")
             if not isinstance(content, list):
                 continue
             texts = [
@@ -335,21 +343,23 @@ class ClaudeBackend(Backend):
         return out
 
     def final_response(self, session_id: str) -> str | None:
-        """Last assistant text block(s) from the session's JSONL transcript.
+        """Last terminal assistant text block(s) from the JSONL transcript.
 
         The transcript stores verbatim content blocks, so this avoids the
         rendered-pane losses (markdown, line-wrap, tool chrome). Returns the
-        text of the last assistant message that contains any text block.
+        text of the last terminal assistant message that contains any text
+        block.
         """
         texts = self._assistant_texts(session_id)
         return texts[-1] if texts else None
 
     def transcript_text_count(self, session_id: str) -> int:
-        """How many text-bearing assistant messages the transcript holds.
+        """How many terminal text-bearing assistant messages the transcript holds.
 
         Baselined before a turn so the caller can tell a freshly-flushed answer
-        from a stale prior one: a `final_response` is only trustworthy once this
-        count has advanced past its pre-submit value.
+        from stale prior text or a pre-tool progress preface: a
+        `final_response` is only trustworthy once this count has advanced past
+        its pre-submit value.
         """
         return len(self._assistant_texts(session_id))
 
