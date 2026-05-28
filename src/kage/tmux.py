@@ -73,9 +73,31 @@ def kill_session(name: str) -> bool:
     return _run_tmux(["kill-session", "-t", name]).returncode == 0
 
 
-def new_session(name: str, command: list[str], *, width: int = 500, height: int = 50) -> None:
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _env_args(env: dict[str, str] | None) -> list[str]:
+    if not env:
+        return []
+    args: list[str] = []
+    for key, value in sorted(env.items()):
+        if not _ENV_NAME_RE.match(key):
+            continue
+        args.extend(["-e", f"{key}={value}"])
+    return args
+
+
+def new_session(
+    name: str,
+    command: list[str],
+    *,
+    width: int = 500,
+    height: int = 50,
+    env: dict[str, str] | None = None,
+) -> None:
     tmux(
         "new-session", "-d", "-s", name,
+        *_env_args(env),
         "-x", str(width), "-y", str(height),
         shlex.join(command),
     )

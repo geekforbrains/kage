@@ -259,6 +259,7 @@ class Session:
         model: str | None = None,
         effort: str | None = None,
         progress: bool = False,
+        env: dict[str, str] | None = None,
         ready_timeout: float = 20.0,
     ) -> None:
         if self.exists():
@@ -284,7 +285,13 @@ class Session:
             effort=cfg_effort,
             settings=settings,
         )
-        tmuxlib.new_session(self.tmux_name, cmd, width=self.width, height=self.height)
+        tmuxlib.new_session(
+            self.tmux_name,
+            cmd,
+            width=self.width,
+            height=self.height,
+            env=env,
+        )
         deadline = time.time() + ready_timeout
         while time.time() < deadline:
             pane = tmuxlib.capture(self.tmux_name)

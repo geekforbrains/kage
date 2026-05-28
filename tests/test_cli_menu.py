@@ -32,6 +32,7 @@ class FakeSession:
         self.stopped = False
         self.started = False
         self.start_progress = None
+        self.start_kwargs = None
         self.send_kwargs = None
 
     def exists(self):
@@ -43,6 +44,7 @@ class FakeSession:
     def start(self, **kwargs):
         self.started = True
         self.start_progress = kwargs.get("progress")
+        self.start_kwargs = kwargs
         self._exists = True
         self._has_hooks = bool(self.start_progress)
 
@@ -130,6 +132,22 @@ def test_stream_mode_starts_new_session_with_progress_hooks(monkeypatch):
     assert rc == cli.EXIT_OK
     assert sess.started is True
     assert sess.start_progress is True
+
+
+def test_start_passes_enso_origin_env(monkeypatch):
+    monkeypatch.setenv("ENSO_ORIGIN_CHANNEL", "C123")
+    monkeypatch.setenv("ENSO_ORIGIN_THREAD_TS", "1700.1")
+    monkeypatch.setenv("UNRELATED_SECRET", "ignored")
+    sess = FakeSession(SendResult(state=State.DONE, text="done"), exists=False)
+    _patch_build(monkeypatch, sess, cleanup_after=False)
+
+    rc = cli.cmd_backend(_args(), "claude")
+
+    assert rc == cli.EXIT_OK
+    assert sess.start_kwargs["env"] == {
+        "ENSO_ORIGIN_CHANNEL": "C123",
+        "ENSO_ORIGIN_THREAD_TS": "1700.1",
+    }
 
 
 def test_stream_mode_restarts_idle_existing_session_without_hooks(monkeypatch):

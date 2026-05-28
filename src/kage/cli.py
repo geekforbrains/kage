@@ -32,6 +32,7 @@ EXIT_INTERACTION_REQUIRED = 10
 EXIT_MENU = EXIT_INTERACTION_REQUIRED
 EXIT_BUSY = 11
 EXIT_TIMEOUT = 124
+_TMUX_ENV_PREFIXES = ("ENSO_ORIGIN_",)
 
 
 # --- input/output helpers ---
@@ -118,6 +119,15 @@ def _output_mode(args: argparse.Namespace) -> str:
 
 def _emit_json(payload: dict, *, flush: bool = False) -> None:
     print(json.dumps(payload), flush=flush)
+
+
+def _tmux_env() -> dict[str, str]:
+    """Environment values that must reach the backend inside tmux."""
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if any(key.startswith(prefix) for prefix in _TMUX_ENV_PREFIXES)
+    }
 
 
 def _emit_response(text: str, *, mode: str, backend: str, session: str | None, session_id: str | None) -> None:
@@ -218,16 +228,17 @@ def cmd_backend(args: argparse.Namespace, backend_name: str) -> int:
     message = _resolve_message(args)
     mode = _output_mode(args)
     sess, cleanup_after = _build_session(args, backend_name)
+    start_kwargs = {
+        "system_prompt": getattr(args, "system_prompt", None),
+        "model": args.model,
+        "effort": args.effort,
+        "env": _tmux_env(),
+    }
+    if mode == "stream":
+        start_kwargs["progress"] = True
 
     if not sess.exists():
         try:
-            start_kwargs = {
-                "system_prompt": getattr(args, "system_prompt", None),
-                "model": args.model,
-                "effort": args.effort,
-            }
-            if mode == "stream":
-                start_kwargs["progress"] = True
             sess.start(**start_kwargs)
         except Exception as e:
             # Another kage process may have created the same tmux session
@@ -244,6 +255,7 @@ def cmd_backend(args: argparse.Namespace, backend_name: str) -> int:
                 )
                 return EXIT_ERROR
     else:
+        restarted = False
         if mode == "stream" and not sess.has_progress_hooks():
             pane = sess.capture()
             if sess.backend.is_busy(pane) or sess.backend.is_menu(pane):
@@ -256,7 +268,8 @@ def cmd_backend(args: argparse.Namespace, backend_name: str) -> int:
             else:
                 sess.stop()
                 try:
-                    sess.start(progress=True)
+                    sess.start(**start_kwargs)
+                    restarted = True
                 except Exception as e:
                     _emit_error(
                         mode=mode,
@@ -268,7 +281,7 @@ def cmd_backend(args: argparse.Namespace, backend_name: str) -> int:
                     )
                     return EXIT_ERROR
         for flag in ("system_prompt", "model", "effort"):
-            if getattr(args, flag, None):
+            if not restarted and getattr(args, flag, None):
                 print(
                     f"warning: --{flag.replace('_', '-')} ignored (session already running)",
                     file=sys.stderr,

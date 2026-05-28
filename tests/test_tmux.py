@@ -39,3 +39,24 @@ def test_new_session_shell_quotes_backend_command(monkeypatch):
     )
 
     assert calls[0][-1] == "claude --append-system-prompt 'two words'"
+
+
+def test_new_session_passes_explicit_environment(monkeypatch):
+    calls = []
+    monkeypatch.setattr(tmux, "tmux", lambda *args, **kwargs: calls.append(args))
+
+    tmux.new_session(
+        "kage_claude_env",
+        ["claude"],
+        env={
+            "ENSO_ORIGIN_CHANNEL": "C123",
+            "ENSO_ORIGIN_THREAD_TS": "1700.1",
+            "not-valid": "ignored",
+        },
+    )
+
+    assert "-e" in calls[0]
+    assert "ENSO_ORIGIN_CHANNEL=C123" in calls[0]
+    assert "ENSO_ORIGIN_THREAD_TS=1700.1" in calls[0]
+    assert "not-valid=ignored" not in calls[0]
+    assert calls[0][-1] == "claude"
