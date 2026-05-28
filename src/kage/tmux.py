@@ -55,7 +55,7 @@ def capture(name: str, *, history: bool = True) -> str:
     if history:
         args += ["-S", "-"]
     raw = strip_ansi(tmux(*args))
-    return "\n".join(l.rstrip() for l in raw.splitlines())
+    return "\n".join(line.rstrip() for line in raw.splitlines())
 
 
 def paste(name: str, text: str) -> None:

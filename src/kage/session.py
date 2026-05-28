@@ -531,7 +531,7 @@ class Session:
             cur = self.capture()
             self._raise_backend_error(cur)
             if command.startswith("/compact"):
-                if any(COMPACT_DONE_RE.match(l) for l in cur.splitlines()):
+                if any(COMPACT_DONE_RE.match(line) for line in cur.splitlines()):
                     return SendResult(state=State.DONE, text=_compact_summary(cur))
             else:
                 # Fall back to done-marker detection for unknown slash commands.
@@ -656,9 +656,9 @@ class Session:
 
 def _compact_summary(pane: str) -> str:
     """Extract the human-visible summary line from a completed /compact."""
-    for l in pane.splitlines():
-        if "⎿" in l and "Compacted" in l:
-            return l.strip().lstrip("⎿").strip()
+    for line in pane.splitlines():
+        if "⎿" in line and "Compacted" in line:
+            return line.strip().lstrip("⎿").strip()
     return ""
 
 

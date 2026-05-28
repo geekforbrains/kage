@@ -74,6 +74,25 @@ once. This keeps the ordinary command shape close to `claude -p`. If a caller
 needs live progress while the turn runs, use `--stream` for newline-delimited
 JSON progress events followed by the final response envelope.
 
+For supervised services that already track conversation IDs, bind kage to a
+caller-owned Claude session and make process interruption clean:
+
+```bash
+kage claude \
+  --stream \
+  --stop-on-signal \
+  --timeout 1800 \
+  --restart \
+  --session-id "$CLAUDE_SESSION_ID" \
+  --model opus \
+  "handle this request"
+```
+
+`--restart` gives each request a fresh tmux pane for the same Claude
+conversation UUID, which is useful when a parent service wants predictable
+hooks and environment propagation. `--stop-on-signal` stops the pane if the
+supervising kage process receives `SIGINT` or `SIGTERM`.
+
 ## Calling from scripts
 
 `kage` is built to be called from automation. The contract is stable:
@@ -109,7 +128,13 @@ import json
 import subprocess
 
 proc = subprocess.Popen(
-    ["kage", "claude", "--stream", "inspect this repo and run the tests"],
+    [
+        "kage", "claude",
+        "--stream",
+        "--stop-on-signal",
+        "--timeout", "1800",
+        "inspect this repo and run the tests",
+    ],
     stdout=subprocess.PIPE,
     stderr=subprocess.PIPE,
     text=True,
@@ -127,6 +152,9 @@ code = proc.wait()
 
 `--stream` exposes hook-level progress such as tool start/finish events. It
 does not expose partial assistant text deltas from Claude's renderer.
+The final `done` envelope is based on Claude's terminal transcript response;
+pre-tool narration such as "I'll check that" is treated as progress and not
+returned as the final answer.
 
 ## Two ways to identify a session
 
@@ -163,6 +191,17 @@ kage session rm   work       # stop tmux pane and forget the state record
 kage session show work       # raw pane dump (debug)
 kage session compact work    # /compact: summarize the conversation
 kage session clear work      # clear context: kill tmux + new UUID, same name
+kage session prune --older-than 24h --dry-run
+                              # show idle panes/orphan hook files to prune
+```
+
+For caller-managed sessions, lifecycle commands that operate on a live pane
+also accept `--session-id`:
+
+```bash
+kage session show  --session-id "$CLAUDE_SESSION_ID"
+kage session kill  --session-id "$CLAUDE_SESSION_ID"
+kage session clear --session-id "$CLAUDE_SESSION_ID" --json
 ```
 
 `clear` vs `compact`:
@@ -171,6 +210,8 @@ kage session clear work      # clear context: kill tmux + new UUID, same name
   history. Useful when you're close to the context window limit.
 - `clear` starts a brand new conversation under the same kage name. The
   old conversation file remains on disk but is no longer referenced.
+- `prune` stops idle tmux panes and reaps orphaned hook/event artifacts.
+  Use `--dry-run` first if you want to see what would be touched.
 
 ## Options
 
@@ -183,6 +224,8 @@ kage session clear work      # clear context: kill tmux + new UUID, same name
 - `--effort LEVEL` -- effort level to pass through (low/medium/high/xhigh/max)
 - `--json` -- emit a JSON envelope instead of plain response text
 - `--stream` -- emit newline-delimited JSON progress events and final envelope
+- `--restart` -- restart an existing tmux pane before sending
+- `--stop-on-signal` -- stop the tmux pane if kage receives SIGINT/SIGTERM
 
 Autonomous behavior is always on. kage removes Claude Code interaction tools
 that would pause for TUI input (`AskUserQuestion`, `EnterPlanMode`,
