@@ -367,28 +367,42 @@ def slug_matches(name: str, slug: str) -> bool:
     return _sanitize(name) == slug
 
 
-def _find_session(name: str) -> tuple[str, str, str | None]:
-    """Return (backend, name, session_id) for a named session record.
+def _find_session(name: str) -> tuple[str, str]:
+    """Return (backend, resolved_name) for a session.
 
     Falls back to running tmux session if no record (anonymous sessions).
     """
     rec = state_mod.get(name)
     if rec:
-        return rec.backend, name, rec.session_id
+        return rec.backend, name
     for backend, slug in list_sessions():
         if slug == name or slug_matches(name, slug):
-            return backend, name, None
+            return backend, slug
     raise KeyError(name)
 
 
-def cmd_session_kill(args: argparse.Namespace) -> int:
+def _session_for_name(name: str) -> tuple[str, str, Session]:
+    backend_name, resolved_name = _find_session(name)
+    if state_mod.get(resolved_name):
+        sess = Session.named(resolved_name, get_backend(backend_name))
+    else:
+        sess = Session(backend=get_backend(backend_name), slug=resolved_name)
+    return backend_name, resolved_name, sess
+
+
+def _load_session(name: str) -> tuple[str, str, Session] | None:
     try:
-        backend_name, name, _sid = _find_session(args.name)
+        return _session_for_name(name)
     except KeyError:
-        print(f"error: no session named {args.name!r}", file=sys.stderr)
+        print(f"error: no session named {name!r}", file=sys.stderr)
+        return None
+
+
+def cmd_session_kill(args: argparse.Namespace) -> int:
+    resolved = _load_session(args.name)
+    if resolved is None:
         return EXIT_ERROR
-    sess = Session.named(name, get_backend(backend_name)) if state_mod.get(name) \
-        else Session(backend=get_backend(backend_name), slug=name)
+    backend_name, name, sess = resolved
     if sess.stop():
         print(f"stopped: {backend_name}/{name}")
         return EXIT_OK
@@ -398,34 +412,26 @@ def cmd_session_kill(args: argparse.Namespace) -> int:
 
 def cmd_session_rm(args: argparse.Namespace) -> int:
     """Stop tmux AND forget the persisted record."""
-    rec = state_mod.get(args.name)
-    if not rec:
-        try:
-            _find_session(args.name)
-        except KeyError:
-            print(f"error: no session named {args.name!r}", file=sys.stderr)
-            return EXIT_ERROR
+    resolved = _load_session(args.name)
+    if resolved is None:
+        return EXIT_ERROR
+    backend_name, name, sess = resolved
+    rec = state_mod.get(name)
     if rec:
-        sess = Session.named(args.name, get_backend(rec.backend))
         sess.stop()
         sess.forget()
-        print(f"removed: {rec.backend}/{args.name}")
+        print(f"removed: {backend_name}/{name}")
     else:
-        backend, name, _ = _find_session(args.name)
-        sess = Session(backend=get_backend(backend), slug=name)
         sess.stop()
-        print(f"stopped anonymous: {backend}/{name}")
+        print(f"stopped anonymous: {backend_name}/{name}")
     return EXIT_OK
 
 
 def cmd_session_show(args: argparse.Namespace) -> int:
-    try:
-        backend_name, name, _sid = _find_session(args.name)
-    except KeyError:
-        print(f"error: no session named {args.name!r}", file=sys.stderr)
+    resolved = _load_session(args.name)
+    if resolved is None:
         return EXIT_ERROR
-    sess = Session.named(name, get_backend(backend_name)) if state_mod.get(name) \
-        else Session(backend=get_backend(backend_name), slug=name)
+    _backend_name, name, sess = resolved
     if not sess.exists():
         print(f"(session {name!r} has no running tmux pane)", file=sys.stderr)
         return EXIT_ERROR
@@ -434,13 +440,10 @@ def cmd_session_show(args: argparse.Namespace) -> int:
 
 
 def cmd_session_menu(args: argparse.Namespace) -> int:
-    try:
-        backend_name, name, _sid = _find_session(args.name)
-    except KeyError:
-        print(f"error: no session named {args.name!r}", file=sys.stderr)
+    resolved = _load_session(args.name)
+    if resolved is None:
         return EXIT_ERROR
-    sess = Session.named(name, get_backend(backend_name)) if state_mod.get(name) \
-        else Session(backend=get_backend(backend_name), slug=name)
+    backend_name, name, sess = resolved
     if not sess.exists():
         print(f"(session {name!r} has no running tmux pane)", file=sys.stderr)
         return EXIT_ERROR
@@ -458,13 +461,10 @@ def cmd_session_menu(args: argparse.Namespace) -> int:
 
 
 def cmd_session_choose(args: argparse.Namespace) -> int:
-    try:
-        backend_name, name, _sid = _find_session(args.name)
-    except KeyError:
-        print(f"error: no session named {args.name!r}", file=sys.stderr)
+    resolved = _load_session(args.name)
+    if resolved is None:
         return EXIT_ERROR
-    sess = Session.named(name, get_backend(backend_name)) if state_mod.get(name) \
-        else Session(backend=get_backend(backend_name), slug=name)
+    backend_name, name, sess = resolved
     try:
         choice: int | str = int(args.choice)
     except ValueError:

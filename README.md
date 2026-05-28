@@ -1,6 +1,6 @@
 # kage
 
-The missing `-p` mode for subscription AI CLIs.
+`claude -p`-style automation through the subscription-backed TUI.
 
 `kage` ("shadow" in Japanese) lets you call interactive AI terminal tools
 like Claude Code as if they were ordinary command-line programs. Under the
@@ -15,10 +15,14 @@ $ kage claude "what is 2+2?"
 
 ## Why
 
-Some AI CLIs only expose their non-interactive (`-p`) mode behind a paid API
-key. If you use the tool on a personal subscription, you're stuck with the
-interactive TUI. `kage` bridges that gap: a real scriptable CLI on top of
-the interactive tool, no API key required.
+`claude -p` used to be the easy way to run one-off agentic commands from
+scripts while using your Claude subscription. As Claude Code's print mode
+moved to separate API-style billing, subscription users were left with the
+interactive TUI as the path that still uses their plan.
+
+`kage` restores the `claude -p` shape without invoking print mode: it drives
+Claude Code through a real TUI in tmux, then returns the final response like a
+normal command-line program.
 
 ## Install
 
@@ -46,7 +50,8 @@ Run `kage doctor` to verify your environment.
 
 ## Quick usage
 
-One-shot, just like `claude -p` would be:
+One-shot, `claude -p`-style, while still driving Claude through its
+interactive TUI:
 
 ```bash
 kage claude "summarize the README at ./README.md in one line"
@@ -65,8 +70,9 @@ echo "what is the capital of france" | kage claude
 ```
 
 `kage` waits for Claude to finish and prints the final response once. This is
-intentional: the public contract is modeled after `claude -p`, not Claude's
-interactive stream.
+intentional: the public contract is modeled after `claude -p`-style output,
+not Claude's interactive stream. The implementation still runs through the
+TUI; it does not invoke Claude Code's `-p`/`--print` mode.
 
 ## Calling from scripts
 
