@@ -69,15 +69,16 @@ Or let stdin be the whole message:
 echo "what is the capital of france" | kage claude
 ```
 
-`kage` waits for Claude to finish and prints the final response once. This is
-intentional: the public contract is modeled after `claude -p`-style output,
-not Claude's interactive stream. The implementation still runs through the
-TUI; it does not invoke Claude Code's `-p`/`--print` mode.
+By default, `kage` waits for Claude to finish and prints the final response
+once. This keeps the ordinary command shape close to `claude -p`. If a caller
+needs live progress while the turn runs, use `--stream` for newline-delimited
+JSON progress events followed by the final response envelope.
 
 ## Calling from scripts
 
 `kage` is built to be called from automation. The contract is stable:
-`--json` for structured output, exit codes for status, stdin for piped input.
+`--json` for one final structured envelope, `--stream` for JSONL progress,
+exit codes for status, stdin for piped input.
 
 ```python
 import subprocess, json
@@ -101,8 +102,31 @@ else:
     print("error:", result.stderr)
 ```
 
-`kage` does not expose tool-use events or partial text deltas. It drives the
-interactive CLI internally and returns the final assistant response.
+For long-running calls, read `--stream` line by line:
+
+```python
+import json
+import subprocess
+
+proc = subprocess.Popen(
+    ["kage", "claude", "--stream", "inspect this repo and run the tests"],
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    text=True,
+)
+
+for line in proc.stdout:
+    event = json.loads(line)
+    if event["status"] == "progress":
+        print(event["event"], event["tool"], event["summary"])
+    elif event["status"] == "done":
+        print(event["response"])
+
+code = proc.wait()
+```
+
+`--stream` exposes hook-level progress such as tool start/finish events. It
+does not expose partial assistant text deltas from Claude's renderer.
 
 ## Two ways to identify a session
 
@@ -158,6 +182,7 @@ kage session clear work      # clear context: kill tmux + new UUID, same name
 - `--model NAME` -- model alias to pass through (e.g. opus, sonnet)
 - `--effort LEVEL` -- effort level to pass through (low/medium/high/xhigh/max)
 - `--json` -- emit a JSON envelope instead of plain response text
+- `--stream` -- emit newline-delimited JSON progress events and final envelope
 
 Autonomous behavior is always on. kage removes Claude Code interaction tools
 that would pause for TUI input (`AskUserQuestion`, `EnterPlanMode`,
@@ -205,6 +230,21 @@ envelope and exits `1`:
  "message":"Not logged in · Please run /login"}
 ```
 
+## Streaming JSONL
+
+`--stream` writes one JSON object per line to stdout and flushes every line so
+a parent process can consume progress while `kage` is still running:
+
+```bash
+$ kage claude --stream "run the tests and summarize failures"
+{"status":"progress","backend":"claude","session":null,"session_id":"...","ts":1760000000.0,"event":"PreToolUse","tool":"Bash","summary":"pytest"}
+{"status":"progress","backend":"claude","session":null,"session_id":"...","ts":1760000001.0,"event":"PostToolUse","tool":"Bash","summary":"pytest"}
+{"status":"done","backend":"claude","session":null,"session_id":"...","response":"All tests passed."}
+```
+
+Error envelopes in stream mode use the same shape as `--json` errors, but are
+also flushed immediately.
+
 ## Library use
 
 ```python
@@ -234,8 +274,10 @@ automation.
    racy for some TUIs).
 3. `kage` polls the rendered pane and watches for backend-specific markers
    (e.g. Claude's `✻ <verb> for Ns`) to know when the response is complete.
-4. The final response is parsed out of the rendered TUI and printed to
-   stdout.
+   In `--stream` mode it also starts Claude with a small hook settings file,
+   tails the hook event log, and flushes those progress events as JSONL.
+4. The final response is parsed out of the rendered TUI, or from Claude's
+   transcript when hook-driven streaming is active, and printed to stdout.
 5. Interactive menus are treated as automation failures with exit code 10.
    kage does not ask the caller to pick from TUI choices.
 
@@ -255,11 +297,11 @@ Things to know before you wire kage into anything important.
   contains real pane snapshots used as regression anchors — when an
   upstream change breaks something, capture the new pane, drop it in as
   a fixture, and fix parsing until tests pass.
-- **Markdown and code-fence formatting is lost.** kage reads the
-  *rendered* pane, so triple-backtick fences, bold/italic markers, and
-  link syntax are gone by the time we see the text — only the visible
-  characters survive. If your caller needs verbatim model output, you
-  want the API, not kage.
+- **Default response formatting comes from the rendered TUI.** In ordinary
+  text and `--json` mode, triple-backtick fences, bold/italic markers, and
+  link syntax may be gone by the time kage sees the text. `--stream` can use
+  Claude's transcript for the final response when hooks are active, but if
+  your caller needs guaranteed verbatim model output, you want the API.
 - **Very long single lines wrap.** The tmux pane is 500 columns wide.
   Anything longer wraps in Claude's renderer and round-trips as multiple
   lines. Most prose and code fits; pathological one-liners (single huge
@@ -268,9 +310,10 @@ Things to know before you wire kage into anything important.
   with `tmux attach -t kage_<backend>_<slug>` to observe, but if you send
   keys while kage has a request in flight, the next response extraction
   will be wrong. Take turns.
-- **Tool calls are not part of the public contract.** `kage` strips Claude's
-  collapsed tool chrome when it can, but callers only receive the final
-  assistant response.
+- **Tool calls are summarized, not replayed.** In default and `--json` mode,
+  callers only receive the final assistant response. In `--stream` mode,
+  callers receive hook-level tool names and short summaries, not full tool
+  inputs, outputs, or partial assistant text.
 - **`kage session show` needs the tmux pane to be running.** If you have
   only a state record (e.g. just after a reboot), run a regular
   `kage claude --session=NAME "..."` first to revive the pane.

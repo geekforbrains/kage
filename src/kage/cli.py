@@ -109,22 +109,44 @@ def _resolve_message(args: argparse.Namespace) -> str:
 
 def _output_mode(args: argparse.Namespace) -> str:
     """Resolve output mode."""
+    if getattr(args, "stream", False):
+        return "stream"
     if getattr(args, "json", False):
         return "json"
     return "text"
 
 
+def _emit_json(payload: dict, *, flush: bool = False) -> None:
+    print(json.dumps(payload), flush=flush)
+
+
 def _emit_response(text: str, *, mode: str, backend: str, session: str | None, session_id: str | None) -> None:
-    if mode == "json":
-        print(json.dumps({
+    if mode in ("json", "stream"):
+        _emit_json({
             "status": "done",
             "backend": backend,
             "session": session,
             "session_id": session_id,
             "response": text,
-        }))
+        }, flush=mode == "stream")
     else:
         print(text)
+
+
+def _emit_progress(event, *, mode: str, backend: str, session: str | None,
+                   session_id: str | None) -> None:
+    if mode != "stream":
+        return
+    _emit_json({
+        "status": "progress",
+        "backend": backend,
+        "session": session,
+        "session_id": session_id,
+        "ts": event.ts,
+        "event": event.event,
+        "tool": event.tool,
+        "summary": event.summary,
+    }, flush=True)
 
 
 def _emit_interaction_required(menu, *, mode: str, backend: str, session: str | None,
@@ -134,15 +156,15 @@ def _emit_interaction_required(menu, *, mode: str, backend: str, session: str | 
         "Claude Code paused on an interactive TUI prompt. kage runs in "
         f"autonomous mode; inspect or reset the session instead. Prompt: {question}"
     )
-    if mode == "json":
-        print(json.dumps({
+    if mode in ("json", "stream"):
+        _emit_json({
             "status": "error",
             "backend": backend,
             "session": session,
             "session_id": session_id,
             "reason": "interaction_required",
             "message": message,
-        }))
+        }, flush=mode == "stream")
         return
     print(f"error: {message}", file=sys.stderr)
 
@@ -156,15 +178,15 @@ def _emit_error(
     reason: str,
     message: str,
 ) -> None:
-    if mode == "json":
-        print(json.dumps({
+    if mode in ("json", "stream"):
+        _emit_json({
             "status": "error",
             "backend": backend,
             "session": session,
             "session_id": session_id,
             "reason": reason,
             "message": message,
-        }))
+        }, flush=mode == "stream")
     else:
         print(f"error: {message}", file=sys.stderr)
 
@@ -199,11 +221,14 @@ def cmd_backend(args: argparse.Namespace, backend_name: str) -> int:
 
     if not sess.exists():
         try:
-            sess.start(
-                system_prompt=getattr(args, "system_prompt", None),
-                model=args.model,
-                effort=args.effort,
-            )
+            start_kwargs = {
+                "system_prompt": getattr(args, "system_prompt", None),
+                "model": args.model,
+                "effort": args.effort,
+            }
+            if mode == "stream":
+                start_kwargs["progress"] = True
+            sess.start(**start_kwargs)
         except Exception as e:
             # Another kage process may have created the same tmux session
             # between our exists() check and new-session. If it exists now,
@@ -219,6 +244,29 @@ def cmd_backend(args: argparse.Namespace, backend_name: str) -> int:
                 )
                 return EXIT_ERROR
     else:
+        if mode == "stream" and not sess.has_progress_hooks():
+            pane = sess.capture()
+            if sess.backend.is_busy(pane) or sess.backend.is_menu(pane):
+                print(
+                    "warning: --stream requested but the running session was "
+                    "started without progress hooks; restart the idle session "
+                    "to enable progress events",
+                    file=sys.stderr,
+                )
+            else:
+                sess.stop()
+                try:
+                    sess.start(progress=True)
+                except Exception as e:
+                    _emit_error(
+                        mode=mode,
+                        backend=backend_name,
+                        session=args.session,
+                        session_id=sess.session_id,
+                        reason="start_failed",
+                        message=f"failed to restart {backend_name} with progress hooks: {e}",
+                    )
+                    return EXIT_ERROR
         for flag in ("system_prompt", "model", "effort"):
             if getattr(args, flag, None):
                 print(
@@ -233,12 +281,23 @@ def cmd_backend(args: argparse.Namespace, backend_name: str) -> int:
         if cleanup_after:
             sess.stop()
 
+
 def _run_send(sess: Session, message: str, args, backend_name: str, mode: str) -> int:
+    def on_event(event) -> None:
+        _emit_progress(
+            event,
+            mode=mode,
+            backend=backend_name,
+            session=args.session,
+            session_id=sess.session_id,
+        )
+
     try:
         result = sess.send(
             message,
             timeout=args.timeout,
             wait_if_busy=not getattr(args, "no_wait", False),
+            on_event=on_event if mode == "stream" else None,
         )
     except SessionBusy as e:
         _emit_error(
@@ -633,6 +692,8 @@ def _add_backend_subparser(sub, backend_name: str) -> None:
                    help="effort level to pass through (low, medium, high, xhigh, max)")
     p.add_argument("--json", action="store_true",
                    help="emit a JSON envelope instead of plain response text")
+    p.add_argument("--stream", action="store_true",
+                   help="emit newline-delimited JSON progress events and final response")
     p.set_defaults(func=lambda a, bn=backend_name: cmd_backend(a, bn))
 
 
