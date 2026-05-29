@@ -269,7 +269,11 @@ def cmd_backend(args: argparse.Namespace, backend_name: str) -> int:
         start_kwargs["progress"] = True
 
     restore_signal_cleanup = None
-    if getattr(args, "stop_on_signal", False):
+    # Tear down the tmux pane if we're interrupted. Ephemeral one-shots are
+    # always cleaned up on signal (the session can't outlive this process, so
+    # leaving it would orphan a pane); named/by-id sessions only do so when the
+    # caller opts in via --stop-on-signal, since those are meant to persist.
+    if getattr(args, "stop_on_signal", False) or cleanup_after:
         restore_signal_cleanup = _install_signal_cleanup(sess)
 
     try:
@@ -422,7 +426,19 @@ def cmd_session_list(args: argparse.Namespace) -> int:
             "last_used_at": rec.last_used_at,
         })
     for backend, slug in running:
-        if not any(r["backend"] == backend and slug_matches(r["name"], slug) for r in rows):
+        # A running session is already represented if a named record matches it
+        # (by name) or another anonymous row already captured it (by slug).
+        # Guard against rows whose name is None — those are anonymous and can
+        # only be matched on their slug, never via slug_matches(None, ...).
+        already = any(
+            r["backend"] == backend
+            and (
+                (r["name"] is not None and slug_matches(r["name"], slug))
+                or r.get("slug") == slug
+            )
+            for r in rows
+        )
+        if not already:
             rows.append({
                 "name": None,
                 "backend": backend,
@@ -447,6 +463,8 @@ def cmd_session_list(args: argparse.Namespace) -> int:
 
 def slug_matches(name: str, slug: str) -> bool:
     from .session import _sanitize  # local import to avoid circular
+    if not name:
+        return False
     return _sanitize(name) == slug
 
 
