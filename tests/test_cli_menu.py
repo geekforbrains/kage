@@ -1,6 +1,7 @@
 """Menu states are surfaced as non-interactive failures."""
 import argparse
 import json
+import os
 import signal
 
 import pytest
@@ -141,6 +142,10 @@ def test_stream_mode_starts_new_session_with_progress_hooks(monkeypatch):
 
 
 def test_start_passes_enso_origin_env(monkeypatch):
+    # Strip any ambient ENSO_ORIGIN_* (present when the suite runs from inside
+    # an Enso/kage session) so the assertion sees only what this test injects.
+    for _k in [k for k in os.environ if k.startswith("ENSO_ORIGIN_")]:
+        monkeypatch.delenv(_k, raising=False)
     monkeypatch.setenv("ENSO_ORIGIN_CHANNEL", "C123")
     monkeypatch.setenv("ENSO_ORIGIN_THREAD_TS", "1700.1")
     monkeypatch.setenv("UNRELATED_SECRET", "ignored")

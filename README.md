@@ -91,7 +91,10 @@ kage claude \
 `--restart` gives each request a fresh tmux pane for the same Claude
 conversation UUID, which is useful when a parent service wants predictable
 hooks and environment propagation. `--stop-on-signal` stops the pane if the
-supervising kage process receives `SIGINT` or `SIGTERM`.
+supervising kage process receives `SIGINT` or `SIGTERM` — only needed for
+named/`--session-id` sessions, which are meant to persist. Ephemeral
+one-shots (no `--session`/`--session-id`) always tear down their pane on
+interruption, so an aborted one-shot never leaves an orphaned pane behind.
 
 ## Calling from scripts
 
@@ -163,7 +166,7 @@ There are two persistence models. Pick the one that fits your caller.
 **Named (kage-managed UUID):** `--session=name`. kage stores the underlying
 conversation UUID in its own state file (`~/.local/state/kage/sessions.json`)
 and reuses it on every call with that name. Survives reboots. Best for
-humans and Enso-style scheduled jobs.
+humans and scheduled jobs.
 
 ```bash
 kage claude --session=work "read src/cli.py and explain"
@@ -172,7 +175,7 @@ kage claude --session=work "now refactor it"   # same conversation
 
 **Caller-managed UUID:** `--session-id=<uuid>`. The caller owns the UUID,
 kage just drives it. No state file involvement. Best for systems that
-already track their own session lifecycles (e.g. Harbour).
+already track their own session lifecycles.
 
 ```bash
 kage claude --session-id=4c8b...69b6 "..."
