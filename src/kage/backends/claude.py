@@ -9,7 +9,11 @@ from pathlib import Path
 from .base import Backend, BackendError, Menu
 
 PROMPT_RE = re.compile(r"^❯(?:[\xa0 ]|$)")
-DONE_RE = re.compile(r"^✻ \S+ for \d+s")
+# Turn-completion summary, e.g. `✻ Puttered for 5s`. Claude formats the
+# elapsed time in compound h/m/s units once a turn passes 60s
+# (`✻ Puttered for 1m 16s`), so match the first duration token regardless of
+# unit — anchoring on `\d+s` alone silently misses every turn over a minute.
+DONE_RE = re.compile(r"^✻ \S+ for \d+[hms]")
 MENU_OPTION_RE = re.compile(r"^\s*(?:❯[\xa0 ])?\s*(\d+)\.\s+(.+?)\s*$")
 MENU_SELECTOR_RE = re.compile(r"^\s*❯[\xa0 ]\s*\d+\.\s+")
 TOOL_CALL_RE = re.compile(

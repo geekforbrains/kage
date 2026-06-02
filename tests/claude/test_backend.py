@@ -212,6 +212,9 @@ def test_start_command_removes_tui_interaction_tools_by_default(backend):
         ("✻ Sautéed for 2s", True),     # Unicode verb (regression for [A-Za-z]+ bug)
         ("✻ Churned for 30s", True),
         ("✻ Pondéring for 1s", True),    # Unicode in middle of verb
+        ("✻ Puttered for 1m 16s", True),  # >60s turn: compound m/s (regression)
+        ("✻ Cogitated for 2m", True),     # whole-minute, no seconds
+        ("✻ Churned for 1h 2m 3s", True), # multi-hour turn
         ("· Percolating…", False),        # spinner, not done
         ("⏺ Bash(ls)", False),
         ("", False),
