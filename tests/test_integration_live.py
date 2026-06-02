@@ -107,3 +107,46 @@ def test_stdin_arg_with_open_pipe_does_not_hang(session):
         os.close(w_fd)
     assert proc.returncode == 0, proc.stderr
     assert "4" in proc.stdout
+
+
+def _stream_done(stdout):
+    """Last `status=done` envelope from a --stream run, or None."""
+    done = None
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if ev.get("status") == "done":
+            done = ev
+    return done
+
+
+def test_restart_stream_returns_fresh_not_previous_answer(session):
+    """Regression for the session-crossover bug.
+
+    `--restart` kills the pane and `claude --resume`s, re-rendering the prior
+    turn into the pane before this turn runs. The streamed answer must be THIS
+    turn's, not the previous turn's response scraped from stale scrollback (the
+    real-world symptom: a sea-shanty answer surfaced for a later jobs question).
+    Uses --stream because that is the path Enso drives chat through and the one
+    the crossover lived on.
+    """
+    r1 = run("claude", "--session", session, "--stream",
+             "Reply with exactly one word: APRICOT. Nothing else.")
+    assert r1.returncode == 0, r1.stderr
+    d1 = _stream_done(r1.stdout)
+    assert d1 and "APRICOT" in d1["response"].upper(), r1.stdout
+
+    r2 = run("claude", "--session", session, "--stream", "--restart",
+             "Forget the previous word. Reply with exactly one word: ZUCCHINI. "
+             "Nothing else.")
+    assert r2.returncode == 0, r2.stderr
+    d2 = _stream_done(r2.stdout)
+    assert d2, r2.stdout
+    resp = d2["response"].upper()
+    assert "ZUCCHINI" in resp, f"crossed/stale response after restart: {d2['response']!r}"
+    assert "APRICOT" not in resp, f"previous turn's answer leaked: {d2['response']!r}"

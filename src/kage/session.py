@@ -613,28 +613,40 @@ class Session:
                     return SendResult(state=State.MENU, menu=menu)
 
             # Done either via the Stop hook (preferred when present) or the
-            # rendered done-marker. Prefer the transcript for the response text
-            # (verbatim), falling back to the pane scrape.
+            # rendered done-marker.
             done = self.backend.done_marker_count(cur) > baseline
             if stop_seen_at is not None or done:
-                # Progress mode (tail set) prefers the verbatim transcript, but
-                # only once this turn's answer has actually been flushed (the
-                # text count advanced past the pre-submit baseline) — otherwise
-                # we'd return the previous turn's stale answer. The default path
-                # stays pure pane-scraping for clean A/B.
                 text = None
                 if tail is not None and self.session_id:
+                    # Stream/chat mode: the session transcript is the SOLE
+                    # source of truth. After a `--restart`/resume the pane is
+                    # re-rendered full of the *prior* conversation, so a stale
+                    # done-marker or Stop can signal completion before this
+                    # turn's answer exists — pane-scraping it then returns the
+                    # previous turn's response (the sea-shanty-for-a-jobs-
+                    # question crossover). Accept completion only once the
+                    # transcript gains a fresh terminal assistant message; never
+                    # fall back to the poisoned pane.
                     if self.backend.transcript_text_count(self.session_id) > resp_baseline:
                         text = self.backend.final_response(self.session_id)
-                if not text:
-                    text = self.backend.extract_response(cur)
-                if not text:
-                    # Stop fired but neither source has text yet; allow the
-                    # pane/transcript a brief grace before declaring empty.
-                    if stop_seen_at is not None and not done \
-                            and time.time() - stop_seen_at < _STOP_GRACE:
+                    if not text:
+                        # This turn's answer hasn't landed yet. Declare empty
+                        # only once Stop has fired and its grace lapsed with no
+                        # new text; otherwise keep waiting for the flush (bounded
+                        # by `deadline`) rather than scraping stale scrollback.
+                        if stop_seen_at is not None \
+                                and time.time() - stop_seen_at >= _STOP_GRACE:
+                            self._raise_empty_response(cur)
                         continue
-                    self._raise_empty_response(cur)
+                else:
+                    # Ephemeral / non-session path: a fresh pane per turn, so the
+                    # rendered response is authoritative.
+                    text = self.backend.extract_response(cur)
+                    if not text:
+                        if stop_seen_at is not None and not done \
+                                and time.time() - stop_seen_at < _STOP_GRACE:
+                            continue
+                        self._raise_empty_response(cur)
                 if self.record:
                     self.record.last_used_at = _now()
                     state_mod.upsert(self.record)
